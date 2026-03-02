@@ -31,8 +31,13 @@ function resolveTotpSecret(userSecret: string | null, envSecret: string | undefi
 
 function twoFactorRequiredResponse(message: string = 'Two factor required.', includeRecoveryCode: boolean = false): Response {
   const providers = includeRecoveryCode
+<<<<<<< HEAD
     ? [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR), TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE]
     : [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)];
+=======
+    ? [TWO_FACTOR_PROVIDER_AUTHENTICATOR, TWO_FACTOR_PROVIDER_RECOVERY_CODE]
+    : [TWO_FACTOR_PROVIDER_AUTHENTICATOR];
+>>>>>>> 41221998c9142902c5f5be775ea5b4309742a640
   const providers2: Record<string, null> = {};
   for (const provider of providers) providers2[provider] = null;
 
