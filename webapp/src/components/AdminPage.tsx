@@ -1,5 +1,6 @@
 import { useState } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, Clipboard, Plus, RefreshCw, Trash2, UserCheck, UserX } from 'lucide-preact';
+import { copyTextToClipboard } from '@/lib/clipboard';
 import type { AdminInvite, AdminUser } from '@/lib/types';
 import { t } from '@/lib/i18n';
 
@@ -10,7 +11,7 @@ interface AdminPageProps {
   onRefresh: () => void;
   onCreateInvite: (hours: number) => Promise<void>;
   onDeleteAllInvites: () => Promise<void>;
-  onToggleUserStatus: (userId: string, currentStatus: string) => Promise<void>;
+  onToggleUserStatus: (userId: string, currentStatus: 'active' | 'banned') => Promise<void>;
   onDeleteUser: (userId: string) => Promise<void>;
   onRevokeInvite: (code: string) => Promise<void>;
 }
@@ -56,11 +57,11 @@ export default function AdminPage(props: AdminPageProps) {
           <tbody>
             {props.users.map((user) => (
               <tr key={user.id}>
-                <td>{user.email}</td>
-                <td>{user.name || t('txt_dash')}</td>
-                <td>{roleText(user.role)}</td>
-                <td>{statusText(user.status)}</td>
-                <td>
+                <td data-label={t('txt_email')}>{user.email}</td>
+                <td data-label={t('txt_name')}>{user.name || t('txt_dash')}</td>
+                <td data-label={t('txt_role')}>{roleText(user.role)}</td>
+                <td data-label={t('txt_status')}>{statusText(user.status)}</td>
+                <td data-label={t('txt_actions')}>
                   <div className="actions">
                     <button
                       type="button"
@@ -126,15 +127,15 @@ export default function AdminPage(props: AdminPageProps) {
           <tbody>
             {pagedInvites.map((invite) => (
               <tr key={invite.code}>
-                <td>{invite.code}</td>
-                <td>{statusText(invite.status)}</td>
-                <td>{formatExpiresAt(invite.expiresAt)}</td>
-                <td>
+                <td data-label={t('txt_code')}>{invite.code}</td>
+                <td data-label={t('txt_status')}>{statusText(invite.status)}</td>
+                <td data-label={t('txt_expires_at')}>{formatExpiresAt(invite.expiresAt)}</td>
+                <td data-label={t('txt_actions')}>
                   <div className="actions invite-row-actions">
                     <button
                       type="button"
                       className="btn btn-secondary"
-                      onClick={() => navigator.clipboard.writeText(invite.inviteLink || '')}
+                      onClick={() => void copyTextToClipboard(invite.inviteLink || '', { successMessage: t('txt_link_copied') })}
                     >
                       <Clipboard size={14} className="btn-icon" /> {t('txt_copy_link')}
                     </button>

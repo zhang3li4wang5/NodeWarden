@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-preact';
+import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
 import { t } from '@/lib/i18n';
@@ -8,6 +9,7 @@ interface SettingsPageProps {
   profile: Profile;
   totpEnabled: boolean;
   onChangePassword: (currentPassword: string, nextPassword: string, nextPassword2: string) => Promise<void>;
+  onSavePasswordHint: (masterPasswordHint: string) => Promise<void>;
   onEnableTotp: (secret: string, token: string) => Promise<void>;
   onOpenDisableTotp: () => void;
   onGetRecoveryCode: (masterPassword: string) => Promise<string>;
@@ -16,9 +18,16 @@ interface SettingsPageProps {
 
 function randomBase32Secret(length: number): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  const random = crypto.getRandomValues(new Uint8Array(length));
   let out = '';
-  for (const x of random) out += alphabet[x % alphabet.length];
+  const maxUnbiasedByte = Math.floor(256 / alphabet.length) * alphabet.length;
+  while (out.length < length) {
+    const random = crypto.getRandomValues(new Uint8Array(length));
+    for (const x of random) {
+      if (x >= maxUnbiasedByte) continue;
+      out += alphabet[x % alphabet.length];
+      if (out.length >= length) break;
+    }
+  }
   return out;
 }
 
@@ -32,6 +41,7 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newPassword2, setNewPassword2] = useState('');
+  const [passwordHint, setPasswordHint] = useState(props.profile.masterPasswordHint || '');
   const [secret, setSecret] = useState(() => localStorage.getItem(totpSecretStorageKey) || randomBase32Secret(32));
   const [token, setToken] = useState('');
   const [totpLocked, setTotpLocked] = useState(props.totpEnabled);
@@ -46,6 +56,10 @@ export default function SettingsPage(props: SettingsPageProps) {
     setTotpLocked(true);
   }, [props.totpEnabled]);
 
+  useEffect(() => {
+    setPasswordHint(props.profile.masterPasswordHint || '');
+  }, [props.profile.masterPasswordHint]);
+
   const qrDataUrl = useMemo(() => {
     const qr = qrcode(0, 'M');
     qr.addData(buildOtpUri(props.profile.email, secret));
@@ -55,10 +69,14 @@ export default function SettingsPage(props: SettingsPageProps) {
   }, [props.profile.email, secret]);
 
   async function enableTotp(): Promise<void> {
-    await props.onEnableTotp(secret, token);
-    // Secret is now stored on the server; remove plaintext copy from localStorage.
-    localStorage.removeItem(totpSecretStorageKey);
-    setTotpLocked(true);
+    try {
+      await props.onEnableTotp(secret, token);
+      // Secret is now stored on the server; remove plaintext copy from localStorage.
+      localStorage.removeItem(totpSecretStorageKey);
+      setTotpLocked(true);
+    } catch {
+      // Keep inputs editable after a failed attempt.
+    }
   }
 
   async function loadRecoveryCode(): Promise<void> {
@@ -69,6 +87,28 @@ export default function SettingsPage(props: SettingsPageProps) {
 
   return (
     <div className="stack">
+      <section className="card">
+        <h3>{t('txt_profile')}</h3>
+        <label className="field">
+          <span>{t('txt_password_hint_optional')}</span>
+          <input
+            className="input"
+            maxLength={120}
+            value={passwordHint}
+            placeholder={t('txt_password_hint_placeholder')}
+            onInput={(e) => setPasswordHint((e.currentTarget as HTMLInputElement).value)}
+          />
+          <div className="field-help">{t('txt_password_hint_register_help')}</div>
+        </label>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => void props.onSavePasswordHint(passwordHint)}
+        >
+          {t('txt_save_profile')}
+        </button>
+      </section>
+
       <section className="card">
         <h3>{t('txt_change_master_password')}</h3>
         <label className="field">
@@ -133,8 +173,7 @@ export default function SettingsPage(props: SettingsPageProps) {
                       className="btn btn-secondary"
                       disabled={totpLocked}
                       onClick={() => {
-                        void navigator.clipboard.writeText(secret);
-                        props.onNotify?.('success', t('txt_secret_copied'));
+                        void copyTextToClipboard(secret, { successMessage: t('txt_secret_copied') });
                       }}
                     >
                       <Clipboard size={14} className="btn-icon" />
@@ -174,10 +213,10 @@ export default function SettingsPage(props: SettingsPageProps) {
                 className="btn btn-secondary"
                 disabled={!recoveryCode}
                 onClick={() => {
-                  void navigator.clipboard.writeText(recoveryCode);
-                  props.onNotify?.('success', t('txt_recovery_code_copied'));
+                  void copyTextToClipboard(recoveryCode, { successMessage: t('txt_recovery_code_copied') });
                 }}
               >
+                <Clipboard size={14} className="btn-icon" />
                 {t('txt_copy_code')}
               </button>
             </div>

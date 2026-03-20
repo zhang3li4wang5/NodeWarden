@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Copy, Eye, EyeOff, File, FileText, LayoutGrid, Pencil, Plus, RefreshCw, Send as SendIcon, Trash2 } from 'lucide-preact';
+import { CheckCheck, ChevronLeft, Copy, Eye, EyeOff, File, FileText, LayoutGrid, Pencil, Plus, RefreshCw, Save, Send as SendIcon, Trash2, X } from 'lucide-preact';
+import { copyTextToClipboard } from '@/lib/clipboard';
 import type { Send, SendDraft } from '@/lib/types';
 import { t } from '@/lib/i18n';
 
@@ -11,11 +12,14 @@ interface SendsPageProps {
   onUpdate: (send: Send, draft: SendDraft, autoCopyLink: boolean) => Promise<void>;
   onDelete: (send: Send) => Promise<void>;
   onBulkDelete: (ids: string[]) => Promise<void>;
+  uploadingSendFileName: string;
+  sendUploadPercent: number | null;
   onNotify: (type: 'success' | 'error', text: string) => void;
 }
 
 type SendTypeFilter = 'all' | 'text' | 'file';
 const AUTO_COPY_KEY = 'nodewarden.send.auto_copy_link.v1';
+const MOBILE_LAYOUT_QUERY = '(max-width: 900px)';
 
 function daysFromNow(iso: string | null | undefined, fallback: number): string {
   if (!iso) return String(fallback);
@@ -67,6 +71,9 @@ export default function SendsPage(props: SendsPageProps) {
   const [draft, setDraft] = useState<SendDraft | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [selectedMap, setSelectedMap] = useState<Record<string, boolean>>({});
+  const [isMobileLayout, setIsMobileLayout] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState<'list' | 'detail' | 'edit'>('list');
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [autoCopyLink, setAutoCopyLink] = useState<boolean>(() => {
     try {
       return localStorage.getItem(AUTO_COPY_KEY) === '1';
@@ -74,6 +81,34 @@ export default function SendsPage(props: SendsPageProps) {
       return false;
     }
   });
+  const sendUploadLabel =
+    props.sendUploadPercent == null
+      ? t('txt_uploading_file_named', { name: props.uploadingSendFileName || t('txt_file') })
+      : t('txt_uploading_file_named_percent', {
+          name: props.uploadingSendFileName || t('txt_file'),
+          percent: props.sendUploadPercent,
+        });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(MOBILE_LAYOUT_QUERY);
+    const sync = () => setIsMobileLayout(media.matches);
+    sync();
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', sync);
+      return () => media.removeEventListener('change', sync);
+    }
+    media.addListener(sync);
+    return () => media.removeListener(sync);
+  }, []);
+
+  useEffect(() => {
+    const onToggleSidebar = () => {
+      setMobileSidebarOpen((open) => !open);
+    };
+    window.addEventListener('nodewarden:toggle-sidebar', onToggleSidebar);
+    return () => window.removeEventListener('nodewarden:toggle-sidebar', onToggleSidebar);
+  }, []);
 
   useEffect(() => {
     try {
@@ -82,6 +117,19 @@ export default function SendsPage(props: SendsPageProps) {
       // ignore storage errors
     }
   }, [autoCopyLink]);
+
+  useEffect(() => {
+    if (!isMobileLayout) {
+      setMobilePanel('list');
+      setMobileSidebarOpen(false);
+      return;
+    }
+    if (isEditing) {
+      setMobilePanel('edit');
+    } else if (!selectedId) {
+      setMobilePanel('list');
+    }
+  }, [isMobileLayout, isEditing, selectedId]);
 
   const filteredSends = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -141,6 +189,7 @@ export default function SendsPage(props: SendsPageProps) {
       setIsCreating(false);
       setDraft(null);
       setShowPassword(false);
+      if (isMobileLayout) setMobilePanel('detail');
     } finally {
       setBusy(false);
     }
@@ -153,6 +202,7 @@ export default function SendsPage(props: SendsPageProps) {
       if (selectedId === send.id) setSelectedId(null);
       setIsEditing(false);
       setDraft(null);
+      if (isMobileLayout) setMobilePanel('list');
     } finally {
       setBusy(false);
     }
@@ -171,13 +221,21 @@ export default function SendsPage(props: SendsPageProps) {
 
   function copyAccessUrl(send: Send): void {
     const url = send.shareUrl || `${window.location.origin}/#/send/${send.accessId}`;
-    void navigator.clipboard.writeText(url);
-    props.onNotify('success', t('txt_link_copied'));
+    void copyTextToClipboard(url, { successMessage: t('txt_link_copied') });
   }
 
   return (
-    <div className="vault-grid">
-      <aside className="sidebar">
+    <div className={`vault-grid ${isMobileLayout ? `mobile-panel-${mobilePanel}` : ''}`}>
+      {isMobileLayout && mobileSidebarOpen && <div className="mobile-sidebar-mask" onClick={() => setMobileSidebarOpen(false)} />}
+      <aside className={`sidebar ${isMobileLayout ? 'mobile-sidebar-sheet' : ''} ${isMobileLayout && mobileSidebarOpen ? 'open' : ''}`}>
+        {isMobileLayout && (
+          <div className="mobile-sidebar-head">
+            <div className="mobile-sidebar-title">{t('txt_all_sends')}</div>
+            <button type="button" className="mobile-sidebar-close" onClick={() => setMobileSidebarOpen(false)} aria-label={t('txt_close')}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
         <div className="sidebar-block">
           <div className="sidebar-title">{t('txt_all_sends')}</div>
           <button type="button" className={`tree-btn ${typeFilter === 'all' ? 'active' : ''}`} onClick={() => setTypeFilter('all')}>
@@ -206,7 +264,7 @@ export default function SendsPage(props: SendsPageProps) {
             value={search}
             onInput={(e) => setSearch((e.currentTarget as HTMLInputElement).value)}
           />
-          <button type="button" className="btn btn-secondary small" disabled={busy || props.loading} onClick={() => void props.onRefresh()}>
+          <button type="button" className="btn btn-secondary small list-icon-btn" disabled={busy || props.loading} onClick={() => void props.onRefresh()}>
             <RefreshCw size={14} className="btn-icon" /> {t('txt_refresh')}
           </button>
         </div>
@@ -224,25 +282,31 @@ export default function SendsPage(props: SendsPageProps) {
               setSelectedMap(map);
             }}
           >
+            <CheckCheck size={14} className="btn-icon" />
             {t('txt_select_all')}
           </button>
           {!!selectedCount && (
             <button type="button" className="btn btn-secondary small" onClick={() => setSelectedMap({})}>
+              <X size={14} className="btn-icon" />
               {t('txt_cancel')}
             </button>
           )}
           <button
             type="button"
-            className="btn btn-primary small"
+            className="btn btn-primary small mobile-fab-trigger"
             disabled={busy}
+            aria-label={t('txt_add')}
+            title={t('txt_add')}
             onClick={() => {
               setIsCreating(true);
               setIsEditing(true);
               setDraft(buildDefaultDraft());
               setShowPassword(false);
+              if (isMobileLayout) setMobilePanel('edit');
+              setMobileSidebarOpen(false);
             }}
           >
-            <Plus size={14} className="btn-icon" /> {t('txt_add')}
+            <Plus size={14} className="btn-icon" />
           </button>
         </div>
         <div className="list-panel">
@@ -267,6 +331,8 @@ export default function SendsPage(props: SendsPageProps) {
                   setIsEditing(false);
                   setIsCreating(false);
                   setDraft(null);
+                  if (isMobileLayout) setMobilePanel('detail');
+                  setMobileSidebarOpen(false);
                 }}
               >
                 <div className="list-icon-wrap">
@@ -287,10 +353,33 @@ export default function SendsPage(props: SendsPageProps) {
         </div>
       </section>
 
-      <section className="detail-col">
+      <section className={`detail-col ${isMobileLayout ? 'mobile-detail-sheet' : ''} ${isMobileLayout && mobilePanel !== 'list' ? 'open' : ''}`}>
+        {isMobileLayout && mobilePanel !== 'list' && (
+          <div className="mobile-panel-head">
+            <button
+              type="button"
+              className="btn btn-secondary small mobile-panel-back"
+              onClick={() => {
+                if (isEditing) {
+                  setIsEditing(false);
+                  setIsCreating(false);
+                  setDraft(null);
+                  setShowPassword(false);
+                  setMobilePanel(selectedSend ? 'detail' : 'list');
+                } else {
+                  setMobilePanel('list');
+                }
+              }}
+            >
+              <ChevronLeft size={14} className="btn-icon" />
+              {t('txt_back')}
+            </button>
+          </div>
+        )}
         {isEditing && draft && (
           <div className="card">
             <h3 className="detail-title">{isCreating ? t('txt_new_send') : t('txt_edit_send')}</h3>
+            {!!props.uploadingSendFileName && <div className="detail-sub">{sendUploadLabel}</div>}
             <div className="field-grid">
               <label className="field field-span-2">
                 <span>{t('txt_name')}</span>
@@ -364,8 +453,23 @@ export default function SendsPage(props: SendsPageProps) {
               </label>
             </div>
             <div className="detail-actions">
-              <button type="button" className="btn btn-primary small" disabled={busy} onClick={() => void saveDraft()}>{t('txt_save')}</button>
-              <button type="button" className="btn btn-secondary small" disabled={busy} onClick={() => { setIsEditing(false); setIsCreating(false); setDraft(null); setShowPassword(false); }}>{t('txt_cancel')}</button>
+              <button type="button" className="btn btn-primary small" disabled={busy} onClick={() => void saveDraft()}>
+                <Save size={14} className="btn-icon" /> {t('txt_save')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary small"
+                disabled={busy}
+                onClick={() => {
+                  setIsEditing(false);
+                  setIsCreating(false);
+                  setDraft(null);
+                  setShowPassword(false);
+                  if (isMobileLayout) setMobilePanel(selectedSend ? 'detail' : 'list');
+                }}
+              >
+                <X size={14} className="btn-icon" /> {t('txt_cancel')}
+              </button>
             </div>
           </div>
         )}

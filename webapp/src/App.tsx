@@ -1,96 +1,77 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Link, Route, Switch, useLocation } from 'wouter';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowUpDown, Cloud, Lock, LogOut, Send as SendIcon, Settings as SettingsIcon, Shield, ShieldUser, Vault } from 'lucide-preact';
+import AppAuthenticatedShell from '@/components/AppAuthenticatedShell';
+import AppGlobalOverlays, { type AppConfirmState } from '@/components/AppGlobalOverlays';
 import AuthViews from '@/components/AuthViews';
-import ConfirmDialog from '@/components/ConfirmDialog';
-import ToastHost from '@/components/ToastHost';
-import VaultPage from '@/components/VaultPage';
-import SendsPage from '@/components/SendsPage';
 import PublicSendPage from '@/components/PublicSendPage';
 import RecoverTwoFactorPage from '@/components/RecoverTwoFactorPage';
 import JwtWarningPage from '@/components/JwtWarningPage';
-import SettingsPage from '@/components/SettingsPage';
-import SecurityDevicesPage from '@/components/SecurityDevicesPage';
-import AdminPage from '@/components/AdminPage';
-import HelpPage from '@/components/HelpPage';
-import ImportExportPage from '@/components/ImportExportPage';
 import {
-  changeMasterPassword,
-  createFolder,
-  createCipher,
   createAuthedFetch,
-  createInvite,
-  createSend,
-  deleteAllInvites,
-  deleteCipher,
-  deleteSend,
-  deleteUser,
-  deriveLoginHash,
-  bulkMoveCiphers,
+  getAuthorizedDevices,
+  getCurrentDeviceIdentifier,
+  getPasswordHint,
+  getTotpStatus,
+  saveSession,
+} from '@/lib/api/auth';
+import { listAdminInvites, listAdminUsers } from '@/lib/api/admin';
+import { buildSendShareKey, getSends } from '@/lib/api/send';
+import {
   getCiphers,
   getFolders,
-  getProfile,
-  getAuthorizedDevices,
-  getSetupStatus,
-  getSends,
-  getTotpStatus,
-  getTotpRecoveryCode,
-  getWebConfig,
-  listAdminInvites,
-  listAdminUsers,
-  loadSession,
-  loginWithPassword,
-  registerAccount,
-  recoverTwoFactor,
-  revokeInvite,
-  revokeAuthorizedDeviceTrust,
-  revokeAllAuthorizedDeviceTrust,
-  saveSession,
-  setTotp,
-  setUserStatus,
-  deleteAuthorizedDevice,
-  updateCipher,
-  updateSend,
-  buildSendShareKey,
-  unlockVaultKey,
-  verifyMasterPassword,
-} from '@/lib/api';
-import { base64ToBytes, decryptBw, decryptStr, hkdf } from '@/lib/crypto';
+  updateFolder,
+} from '@/lib/api/vault';
+import { silentlyRepairBackupSettingsIfNeeded } from '@/lib/backup-settings-repair';
+import { base64ToBytes, decryptBw, decryptStr } from '@/lib/crypto';
+import {
+  buildPublicSendUrl,
+  deriveSendKeyParts,
+  looksLikeCipherString,
+  parseSignalRTextFrames,
+  readInviteCodeFromUrl,
+} from '@/lib/app-support';
+import {
+  bootstrapAppSession,
+  type CompletedLogin,
+  readInitialAppBootstrapState,
+  performPasswordLogin,
+  performRecoverTwoFactorLogin,
+  performRegistration,
+  performTotpLogin,
+  performUnlock,
+  type JwtUnsafeReason,
+  type PendingTotp,
+} from '@/lib/app-auth';
+import useAccountSecurityActions from '@/hooks/useAccountSecurityActions';
+import useAdminActions from '@/hooks/useAdminActions';
+import useBackupActions from '@/hooks/useBackupActions';
+import useVaultSendActions from '@/hooks/useVaultSendActions';
+import { useToastManager } from '@/hooks/useToastManager';
 import { t } from '@/lib/i18n';
-import type { AppPhase, AuthorizedDevice, Cipher, Folder, Profile, Send, SendDraft, SessionState, ToastMessage, VaultDraft } from '@/lib/types';
+import { APP_NOTIFY_EVENT, type AppNotifyDetail } from '@/lib/app-notify';
+import type { AppPhase, Cipher, Folder as VaultFolder, Profile, Send, SessionState } from '@/lib/types';
 
-interface PendingTotp {
-  email: string;
-  passwordHash: string;
-  masterKey: Uint8Array;
-}
-
-type JwtUnsafeReason = 'missing' | 'default' | 'too_short';
-
-const SEND_KEY_SALT = 'bitwarden-send';
-const SEND_KEY_PURPOSE = 'send';
-
-function buildPublicSendUrl(origin: string, accessId: string, keyPart: string): string {
-  return `${origin}/#/send/${accessId}/${keyPart}`;
-}
-
-async function deriveSendKeyParts(sendKeyMaterial: Uint8Array): Promise<{ enc: Uint8Array; mac: Uint8Array }> {
-  if (sendKeyMaterial.length >= 64) {
-    return { enc: sendKeyMaterial.slice(0, 32), mac: sendKeyMaterial.slice(32, 64) };
-  }
-  const derived = await hkdf(sendKeyMaterial, SEND_KEY_SALT, SEND_KEY_PURPOSE, 64);
-  return { enc: derived.slice(0, 32), mac: derived.slice(32, 64) };
-}
+const IMPORT_ROUTE = '/backup/import-export';
+const IMPORT_ROUTE_PATHS = [IMPORT_ROUTE, '/tools/import', '/tools/import-export', '/tools/import-data', '/import', '/import-export'] as const;
+const IMPORT_ROUTE_ALIASES: ReadonlySet<string> = new Set(IMPORT_ROUTE_PATHS.filter((path) => path !== IMPORT_ROUTE));
+const SETTINGS_HOME_ROUTE = '/settings';
+const SETTINGS_ACCOUNT_ROUTE = '/settings/account';
+const SIGNALR_RECORD_SEPARATOR = String.fromCharCode(0x1e);
+const SIGNALR_UPDATE_TYPE_SYNC_VAULT = 5;
+const SIGNALR_UPDATE_TYPE_LOG_OUT = 11;
+const SIGNALR_UPDATE_TYPE_DEVICE_STATUS = 12;
 
 export default function App() {
+  const initialBootstrap = useMemo(() => readInitialAppBootstrapState(), []);
+  const initialInviteCode = useMemo(() => readInviteCodeFromUrl(), []);
+  const [pendingAuthAction, setPendingAuthAction] = useState<'login' | 'register' | 'unlock' | null>(null);
   const [location, navigate] = useLocation();
-  const [phase, setPhase] = useState<AppPhase>('loading');
-  const [session, setSessionState] = useState<SessionState | null>(null);
+  const [phase, setPhase] = useState<AppPhase>(initialBootstrap.phase);
+  const [session, setSessionState] = useState<SessionState | null>(initialBootstrap.session);
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [defaultKdfIterations, setDefaultKdfIterations] = useState(600000);
-  const [setupRegistered, setSetupRegistered] = useState(true);
-  const [jwtWarning, setJwtWarning] = useState<{ reason: JwtUnsafeReason; minLength: number } | null>(null);
+  const [defaultKdfIterations, setDefaultKdfIterations] = useState(initialBootstrap.defaultKdfIterations);
+  const [jwtWarning, setJwtWarning] = useState<{ reason: JwtUnsafeReason; minLength: number } | null>(initialBootstrap.jwtWarning);
 
   const [loginValues, setLoginValues] = useState({ email: '', password: '' });
   const [registerValues, setRegisterValues] = useState({
@@ -98,8 +79,19 @@ export default function App() {
     email: '',
     password: '',
     password2: '',
-    inviteCode: '',
+    passwordHint: '',
+    inviteCode: initialInviteCode,
   });
+  const [loginHintState, setLoginHintState] = useState<{
+    email: string;
+    loading: boolean;
+    hint: string | null;
+  }>({
+    email: '',
+    loading: false,
+    hint: null,
+  });
+  const [inviteCodeFromUrl, setInviteCodeFromUrl] = useState(initialInviteCode);
   const [unlockPassword, setUnlockPassword] = useState('');
   const [pendingTotp, setPendingTotp] = useState<PendingTotp | null>(null);
   const [totpCode, setTotpCode] = useState('');
@@ -109,30 +101,84 @@ export default function App() {
   const [disableTotpPassword, setDisableTotpPassword] = useState('');
   const [recoverValues, setRecoverValues] = useState({ email: '', password: '', recoveryCode: '' });
 
-  const [confirm, setConfirm] = useState<{
-    title: string;
-    message: string;
-    danger?: boolean;
-    showIcon?: boolean;
-    onConfirm: () => void;
-  } | null>(null);
-
-  const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const [decryptedFolders, setDecryptedFolders] = useState<Folder[]>([]);
+  const [confirm, setConfirm] = useState<AppConfirmState | null>(null);
+  const [mobileLayout, setMobileLayout] = useState(false);
+  const [decryptedFolders, setDecryptedFolders] = useState<VaultFolder[]>([]);
   const [decryptedCiphers, setDecryptedCiphers] = useState<Cipher[]>([]);
   const [decryptedSends, setDecryptedSends] = useState<Send[]>([]);
+  const sessionRef = useRef<SessionState | null>(initialBootstrap.session);
+  const migratedPlainFolderIdsRef = useRef<Set<string>>(new Set());
+  const silentRefreshVaultRef = useRef<() => Promise<void>>(async () => {});
+  const refreshAuthorizedDevicesRef = useRef<() => Promise<void>>(async () => {});
+  const repairAttemptRef = useRef<string>('');
+  const { toasts, pushToast, removeToast } = useToastManager();
+
+  useEffect(() => {
+    const handleAppNotify = (event: Event) => {
+      const detail = (event as CustomEvent<AppNotifyDetail>).detail;
+      if (!detail?.text) return;
+      pushToast(detail.type, detail.text);
+    };
+
+    window.addEventListener(APP_NOTIFY_EVENT, handleAppNotify as EventListener);
+    return () => window.removeEventListener(APP_NOTIFY_EVENT, handleAppNotify as EventListener);
+  }, [pushToast]);
+
+  useEffect(() => {
+    const syncInviteFromUrl = () => {
+      setInviteCodeFromUrl(readInviteCodeFromUrl());
+    };
+    syncInviteFromUrl();
+    window.addEventListener('hashchange', syncInviteFromUrl);
+    window.addEventListener('popstate', syncInviteFromUrl);
+    return () => {
+      window.removeEventListener('hashchange', syncInviteFromUrl);
+      window.removeEventListener('popstate', syncInviteFromUrl);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inviteCodeFromUrl) return;
+    setRegisterValues((prev) => (prev.inviteCode === inviteCodeFromUrl ? prev : { ...prev, inviteCode: inviteCodeFromUrl }));
+  }, [inviteCodeFromUrl]);
+
+  useEffect(() => {
+    const normalizedEmail = loginValues.email.trim().toLowerCase();
+    setLoginHintState((prev) => (
+      prev.email && prev.email !== normalizedEmail
+        ? { email: '', loading: false, hint: null }
+        : prev
+    ));
+  }, [loginValues.email]);
+
+  useEffect(() => {
+    if (!inviteCodeFromUrl) return;
+    if (phase === 'locked' || phase === 'app') return;
+    setPhase('register');
+    if (location !== '/register') navigate('/register');
+    if (typeof window !== 'undefined' && typeof window.history?.replaceState === 'function') {
+      window.history.replaceState(null, '', '/register');
+    }
+    setInviteCodeFromUrl('');
+  }, [inviteCodeFromUrl, phase, location, navigate]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(max-width: 900px)');
+    const sync = () => setMobileLayout(media.matches);
+    sync();
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', sync);
+      return () => media.removeEventListener('change', sync);
+    }
+    media.addListener(sync);
+    return () => media.removeListener(sync);
+  }, []);
 
   function setSession(next: SessionState | null) {
+    sessionRef.current = next;
     setSessionState(next);
     saveSession(next);
-  }
-
-  function pushToast(type: ToastMessage['type'], text: string) {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setToasts((prev) => [...prev.slice(-3), { id, type, text }]);
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== id));
-    }, 4500);
   }
 
   const authedFetch = useMemo(
@@ -143,75 +189,54 @@ export default function App() {
           setSession(next);
           if (!next) {
             setProfile(null);
-            setPhase(setupRegistered ? 'login' : 'register');
+            setPhase('login');
           }
         }
       ),
-    [session, setupRegistered]
+    [session]
   );
+  const importAuthedFetch = useMemo(
+    () => async (input: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers || {});
+      headers.set('X-NodeWarden-Import', '1');
+      return authedFetch(input, { ...init, headers });
+    },
+    [authedFetch]
+  );
+  const backupActions = useBackupActions({
+    authedFetch,
+    onImported: () => {
+      window.setTimeout(() => {
+        logoutNow();
+      }, 200);
+    },
+    onRestored: () => {
+      window.setTimeout(() => {
+        logoutNow();
+      }, 200);
+    },
+  });
 
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [setup, config] = await Promise.all([getSetupStatus(), getWebConfig()]);
+      const boot = await bootstrapAppSession(initialBootstrap);
       if (!mounted) return;
-      setSetupRegistered(setup.registered);
-      setDefaultKdfIterations(Number(config.defaultKdfIterations || 600000));
-      const jwtUnsafeReason = config.jwtUnsafeReason || null;
-      if (jwtUnsafeReason) {
-        setJwtWarning({
-          reason: jwtUnsafeReason,
-          minLength: Number(config.jwtSecretMinLength || 32),
-        });
-        setSession(null);
-        setProfile(null);
-        setPhase('login');
-        return;
-      }
-      setJwtWarning(null);
-
-      const loaded = loadSession();
-      if (!loaded) {
-        setPhase(setup.registered ? 'login' : 'register');
-        return;
-      }
-      setSession(loaded);
-
-      try {
-        const profileResp = await getProfile(
-          createAuthedFetch(
-            () => loaded,
-            (next) => {
-              if (!next) return;
-              setSession(next);
-            }
-          )
-        );
-        if (!mounted) return;
-        setProfile(profileResp);
-        setPhase('locked');
-      } catch {
-        setSession(null);
-        setPhase(setup.registered ? 'login' : 'register');
-      }
+      setDefaultKdfIterations(boot.defaultKdfIterations);
+      setJwtWarning(boot.jwtWarning);
+      setSession(boot.session);
+      setProfile(boot.profile);
+      setPhase(boot.phase);
     })();
 
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [initialBootstrap]);
 
-  async function finalizeLogin(tokenAccess: string, tokenRefresh: string, email: string, masterKey: Uint8Array) {
-    const baseSession: SessionState = { accessToken: tokenAccess, refreshToken: tokenRefresh, email };
-    const tempFetch = createAuthedFetch(
-      () => baseSession,
-      () => {}
-    );
-    const profileResp = await getProfile(tempFetch);
-    const keys = await unlockVaultKey(profileResp.key, masterKey);
-    const nextSession = { ...baseSession, ...keys };
-    setSession(nextSession);
-    setProfile(profileResp);
+  async function finalizeLogin(login: CompletedLogin) {
+    setSession(login.session);
+    setProfile(login.profile);
     setPendingTotp(null);
     setTotpCode('');
     setPhase('app');
@@ -219,34 +244,41 @@ export default function App() {
       navigate('/vault');
     }
     pushToast('success', t('txt_login_success'));
+    void (async () => {
+      try {
+        const hydratedProfile = await login.profilePromise;
+        if (sessionRef.current?.accessToken !== login.session.accessToken) return;
+        setProfile(hydratedProfile);
+      } catch {
+        // Keep the in-memory transient profile for the current session.
+      }
+    })();
   }
 
   async function handleLogin() {
+    if (pendingAuthAction) return;
     if (!loginValues.email || !loginValues.password) {
       pushToast('error', t('txt_please_input_email_and_password'));
       return;
     }
+    setPendingAuthAction('login');
     try {
-      const derived = await deriveLoginHash(loginValues.email, loginValues.password, defaultKdfIterations);
-      const token = await loginWithPassword(loginValues.email, derived.hash, { useRememberToken: true });
-      if ('access_token' in token && token.access_token) {
-        await finalizeLogin(token.access_token, token.refresh_token, loginValues.email.toLowerCase(), derived.masterKey);
+      const result = await performPasswordLogin(loginValues.email, loginValues.password, defaultKdfIterations);
+      if (result.kind === 'success') {
+        await finalizeLogin(result.login);
         return;
       }
-      const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
-      if (tokenError.TwoFactorProviders) {
-        setPendingTotp({
-          email: loginValues.email.toLowerCase(),
-          passwordHash: derived.hash,
-          masterKey: derived.masterKey,
-        });
+      if (result.kind === 'totp') {
+        setPendingTotp(result.pendingTotp);
         setTotpCode('');
         setRememberDevice(true);
         return;
       }
-      pushToast('error', tokenError.error_description || tokenError.error || t('txt_login_failed'));
+      pushToast('error', result.message || t('txt_login_failed'));
     } catch (error) {
       pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
+    } finally {
+      setPendingAuthAction(null);
     }
   }
 
@@ -256,16 +288,12 @@ export default function App() {
       pushToast('error', t('txt_please_input_totp_code'));
       return;
     }
-    const token = await loginWithPassword(pendingTotp.email, pendingTotp.passwordHash, {
-      totpCode: totpCode.trim(),
-      rememberDevice,
-    });
-    if ('access_token' in token && token.access_token) {
-      await finalizeLogin(token.access_token, token.refresh_token, pendingTotp.email, pendingTotp.masterKey);
-      return;
+    try {
+      const login = await performTotpLogin(pendingTotp, totpCode, rememberDevice);
+      await finalizeLogin(login);
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_totp_verify_failed'));
     }
-    const tokenError = token as { error_description?: string; error?: string };
-    pushToast('error', tokenError.error_description || tokenError.error || t('txt_totp_verify_failed'));
   }
 
   async function handleRecoverTwoFactorSubmit() {
@@ -277,11 +305,9 @@ export default function App() {
       return;
     }
     try {
-      const derived = await deriveLoginHash(email, password, defaultKdfIterations);
-      const recovered = await recoverTwoFactor(email, derived.hash, recoveryCode);
-      const token = await loginWithPassword(email, derived.hash, { useRememberToken: false });
-      if ('access_token' in token && token.access_token) {
-        await finalizeLogin(token.access_token, token.refresh_token, email, derived.masterKey);
+      const recovered = await performRecoverTwoFactorLogin(email, password, recoveryCode, defaultKdfIterations);
+      if (recovered.login) {
+        await finalizeLogin(recovered.login);
         if (recovered.newRecoveryCode) {
           pushToast('success', t('txt_text_2fa_recovered_new_recovery_code_code', { code: recovered.newRecoveryCode }));
         } else {
@@ -297,6 +323,7 @@ export default function App() {
   }
 
   async function handleRegister() {
+    if (pendingAuthAction) return;
     if (!registerValues.email || !registerValues.password) {
       pushToast('error', t('txt_please_input_email_and_password'));
       return;
@@ -309,38 +336,98 @@ export default function App() {
       pushToast('error', t('txt_passwords_do_not_match'));
       return;
     }
-    const resp = await registerAccount({
-      email: registerValues.email.toLowerCase(),
-      name: registerValues.name.trim(),
-      password: registerValues.password,
-      inviteCode: registerValues.inviteCode.trim(),
-      fallbackIterations: defaultKdfIterations,
+    setPendingAuthAction('register');
+    try {
+      const resp = await performRegistration({
+        email: registerValues.email,
+        name: registerValues.name,
+        password: registerValues.password,
+        masterPasswordHint: registerValues.passwordHint,
+        inviteCode: registerValues.inviteCode,
+        fallbackIterations: defaultKdfIterations,
+      });
+      if (!resp.ok) {
+        pushToast('error', resp.message);
+        return;
+      }
+      setLoginValues({ email: registerValues.email.toLowerCase(), password: '' });
+      setPhase('login');
+      navigate('/login');
+      pushToast('success', t('txt_registration_succeeded_please_sign_in'));
+    } finally {
+      setPendingAuthAction(null);
+    }
+  }
+
+  function openPasswordHintDialog(hint: string | null) {
+    setConfirm({
+      title: t('txt_password_hint'),
+      message: hint || t('txt_password_hint_not_set'),
+      showIcon: false,
+      confirmText: t('txt_close'),
+      hideCancel: true,
+      onConfirm: () => setConfirm(null),
     });
-    if (!resp.ok) {
-      pushToast('error', resp.message);
+  }
+
+  async function handleTogglePasswordHint() {
+    if (pendingAuthAction) return;
+    const email = loginValues.email.trim().toLowerCase();
+    if (!email) return;
+
+    if (loginHintState.email === email && !loginHintState.loading) {
+      openPasswordHintDialog(loginHintState.hint);
       return;
     }
-    setLoginValues({ email: registerValues.email.toLowerCase(), password: '' });
-    setPhase('login');
-    pushToast('success', t('txt_registration_succeeded_please_sign_in'));
+
+    setLoginHintState({
+      email,
+      loading: true,
+      hint: null,
+    });
+
+    try {
+      const result = await getPasswordHint(email);
+      openPasswordHintDialog(result.masterPasswordHint);
+      setLoginHintState({
+        email,
+        loading: false,
+        hint: result.masterPasswordHint,
+      });
+    } catch (error) {
+      setLoginHintState({
+        email: '',
+        loading: false,
+        hint: null,
+      });
+      pushToast('error', error instanceof Error ? error.message : t('txt_password_hint_load_failed'));
+    }
+  }
+
+  function handleShowLockedPasswordHint() {
+    if (pendingAuthAction) return;
+    openPasswordHintDialog(profile?.masterPasswordHint ?? null);
   }
 
   async function handleUnlock() {
+    if (pendingAuthAction) return;
     if (!session || !profile) return;
     if (!unlockPassword) {
       pushToast('error', t('txt_please_input_master_password'));
       return;
     }
+    setPendingAuthAction('unlock');
     try {
-      const derived = await deriveLoginHash(profile.email || session.email, unlockPassword, defaultKdfIterations);
-      const keys = await unlockVaultKey(profile.key, derived.masterKey);
-      setSession({ ...session, ...keys });
+      const nextSession = await performUnlock(session, profile, unlockPassword, defaultKdfIterations);
+      setSession(nextSession);
       setUnlockPassword('');
       setPhase('app');
       if (location === '/' || location === '/lock') navigate('/vault');
       pushToast('success', t('txt_unlocked'));
     } catch {
       pushToast('error', t('txt_unlock_failed_master_password_is_incorrect'));
+    } finally {
+      setPendingAuthAction(null);
     }
   }
 
@@ -359,7 +446,7 @@ export default function App() {
     setSession(null);
     setProfile(null);
     setPendingTotp(null);
-    setPhase(setupRegistered ? 'login' : 'register');
+    setPhase('login');
     navigate('/login');
   }
 
@@ -372,6 +459,30 @@ export default function App() {
         logoutNow();
       },
     });
+  }
+
+  function renderPassiveOverlays() {
+    return (
+      <AppGlobalOverlays
+        toasts={toasts}
+        onCloseToast={removeToast}
+        confirm={null}
+        onCancelConfirm={() => {}}
+        pendingTotpOpen={false}
+        totpCode=""
+        rememberDevice={false}
+        onTotpCodeChange={() => {}}
+        onRememberDeviceChange={() => {}}
+        onConfirmTotp={() => {}}
+        onCancelTotp={() => {}}
+        onUseRecoveryCode={() => {}}
+        disableTotpOpen={false}
+        disableTotpPassword=""
+        onDisableTotpPasswordChange={() => {}}
+        onConfirmDisableTotp={() => {}}
+        onCancelDisableTotp={() => {}}
+      />
+    );
   }
 
   const ciphersQuery = useQuery({
@@ -409,6 +520,20 @@ export default function App() {
     queryFn: () => getAuthorizedDevices(authedFetch),
     enabled: phase === 'app' && !!session?.accessToken,
   });
+
+  useEffect(() => {
+    if (phase !== 'app' || !session?.accessToken || !session?.symEncKey || !session?.symMacKey) return;
+    if (!profile?.role || profile.role !== 'admin') return;
+    if (repairAttemptRef.current === session.accessToken) return;
+
+    repairAttemptRef.current = session.accessToken;
+    void silentlyRepairBackupSettingsIfNeeded(session, profile);
+  }, [phase, session?.accessToken, session?.symEncKey, session?.symMacKey, profile]);
+
+  useEffect(() => {
+    if (session?.accessToken) return;
+    repairAttemptRef.current = '';
+  }, [session?.accessToken]);
 
   useEffect(() => {
     if (!session?.symEncKey || !session?.symMacKey) {
@@ -470,6 +595,9 @@ export default function App() {
                 decUsername: await decryptField(cipher.login.username || '', itemEnc, itemMac),
                 decPassword: await decryptField(cipher.login.password || '', itemEnc, itemMac),
                 decTotp: await decryptField(cipher.login.totp || '', itemEnc, itemMac),
+                fido2Credentials: Array.isArray(cipher.login.fido2Credentials)
+                  ? cipher.login.fido2Credentials.map((credential) => ({ ...credential }))
+                  : null,
                 uris: await Promise.all(
                   (cipher.login.uris || []).map(async (u) => ({
                     ...u,
@@ -513,11 +641,14 @@ export default function App() {
               };
             }
             if (cipher.sshKey) {
+              const encryptedFingerprint = cipher.sshKey.keyFingerprint || cipher.sshKey.fingerprint || '';
               nextCipher.sshKey = {
                 ...cipher.sshKey,
                 decPrivateKey: await decryptField(cipher.sshKey.privateKey || '', itemEnc, itemMac),
                 decPublicKey: await decryptField(cipher.sshKey.publicKey || '', itemEnc, itemMac),
-                decFingerprint: await decryptField(cipher.sshKey.fingerprint || '', itemEnc, itemMac),
+                keyFingerprint: encryptedFingerprint || null,
+                fingerprint: encryptedFingerprint || null,
+                decFingerprint: await decryptField(encryptedFingerprint, itemEnc, itemMac),
               };
             }
             if (cipher.fields) {
@@ -526,6 +657,14 @@ export default function App() {
                   ...field,
                   decName: await decryptField(field.name || '', itemEnc, itemMac),
                   decValue: await decryptField(field.value || '', itemEnc, itemMac),
+                }))
+              );
+            }
+            if (Array.isArray(cipher.attachments)) {
+              nextCipher.attachments = await Promise.all(
+                cipher.attachments.map(async (attachment) => ({
+                  ...attachment,
+                  decFileName: await decryptField(attachment.fileName || '', itemEnc, itemMac),
                 }))
               );
             }
@@ -580,252 +719,310 @@ export default function App() {
     };
   }, [session?.symEncKey, session?.symMacKey, foldersQuery.data, ciphersQuery.data, sendsQuery.data]);
 
-  async function changePasswordAction(currentPassword: string, nextPassword: string, nextPassword2: string) {
-    if (!profile) return;
-    if (!currentPassword || !nextPassword) {
-      pushToast('error', t('txt_current_new_password_is_required'));
-      return;
-    }
-    if (nextPassword.length < 12) {
-      pushToast('error', t('txt_new_password_must_be_at_least_12_chars'));
-      return;
-    }
-    if (nextPassword !== nextPassword2) {
-      pushToast('error', t('txt_new_passwords_do_not_match'));
-      return;
-    }
-    try {
-      await changeMasterPassword(authedFetch, {
-        email: profile.email,
-        currentPassword,
-        newPassword: nextPassword,
-        currentIterations: defaultKdfIterations,
-        profileKey: profile.key,
+  useEffect(() => {
+    if (!session?.symEncKey || !session?.symMacKey || !foldersQuery.data?.length) return;
+    let cancelled = false;
+    (async () => {
+      const pending = foldersQuery.data.filter((folder) => {
+        if (!folder?.id || !folder?.name) return false;
+        if (migratedPlainFolderIdsRef.current.has(folder.id)) return false;
+        return !looksLikeCipherString(String(folder.name));
       });
-      handleLogout();
-      pushToast('success', t('txt_master_password_changed_please_login_again'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_change_password_failed'));
-    }
+      if (!pending.length) return;
+      for (const folder of pending) {
+        try {
+          await updateFolder(authedFetch, session, folder.id, String(folder.name));
+          migratedPlainFolderIdsRef.current.add(folder.id);
+        } catch {
+          // keep silent; web still supports plaintext fallback display
+        }
+      }
+      if (!cancelled) await foldersQuery.refetch();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.symEncKey, session?.symMacKey, foldersQuery.data, authedFetch]);
+
+  async function refreshVaultSilently() {
+    await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch(), sendsQuery.refetch()]);
   }
 
-  async function enableTotpAction(secret: string, token: string) {
-    if (!secret.trim() || !token.trim()) {
-      pushToast('error', t('txt_secret_and_code_are_required'));
-      return;
-    }
-    try {
-      await setTotp(authedFetch, { enabled: true, secret: secret.trim(), token: token.trim() });
-      pushToast('success', t('txt_totp_enabled'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_enable_totp_failed'));
-    }
-  }
+  silentRefreshVaultRef.current = refreshVaultSilently;
 
-  async function disableTotpAction() {
-    if (!profile) return;
-    if (!disableTotpPassword) {
-      pushToast('error', t('txt_please_input_master_password'));
-      return;
-    }
-    try {
-      const derived = await deriveLoginHash(profile.email, disableTotpPassword, defaultKdfIterations);
-      await setTotp(authedFetch, { enabled: false, masterPasswordHash: derived.hash });
-      if (profile?.id) localStorage.removeItem(`nodewarden.totp.secret.${profile.id}`);
+  useEffect(() => {
+    if (phase !== 'app' || !session?.accessToken || !session?.symEncKey || !session?.symMacKey) return;
+
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempts = 0;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      clearReconnectTimer();
+      const delay = Math.min(10000, 1000 * Math.max(1, reconnectAttempts + 1));
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (disposed) return;
+      try {
+        const hubUrl = new URL('/notifications/hub', window.location.origin);
+        hubUrl.searchParams.set('access_token', session.accessToken);
+        hubUrl.protocol = hubUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(hubUrl.toString());
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+
+      socket.addEventListener('open', () => {
+        reconnectAttempts = 0;
+        void refreshAuthorizedDevicesRef.current();
+        try {
+          socket?.send(`{"protocol":"json","version":1}${SIGNALR_RECORD_SEPARATOR}`);
+        } catch {
+          socket?.close();
+        }
+      });
+
+      socket.addEventListener('message', (event) => {
+        if (disposed) return;
+        if (typeof event.data !== 'string') return;
+
+        const frames = parseSignalRTextFrames(event.data);
+        for (const frame of frames) {
+          if (frame.type !== 1 || frame.target !== 'ReceiveMessage') continue;
+          const updateType = Number(frame.arguments?.[0]?.Type || 0);
+          if (updateType === SIGNALR_UPDATE_TYPE_LOG_OUT) {
+            logoutNow();
+            return;
+          }
+          if (updateType === SIGNALR_UPDATE_TYPE_DEVICE_STATUS) {
+            void refreshAuthorizedDevicesRef.current();
+            continue;
+          }
+          if (updateType !== SIGNALR_UPDATE_TYPE_SYNC_VAULT) continue;
+          const contextId = String(frame.arguments?.[0]?.ContextId || '').trim();
+          if (contextId && contextId === getCurrentDeviceIdentifier()) continue;
+          void silentRefreshVaultRef.current();
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        socket = null;
+        void refreshAuthorizedDevicesRef.current();
+        scheduleReconnect();
+      });
+
+      socket.addEventListener('error', () => {
+        try {
+          socket?.close();
+        } catch {
+          // ignore close races
+        }
+      });
+    };
+
+    connect();
+
+    return () => {
+      disposed = true;
+      clearReconnectTimer();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          socket.close();
+        } catch {
+          // ignore close races
+        }
+      }
+    };
+  }, [phase, session?.accessToken, session?.symEncKey, session?.symMacKey]);
+
+  const vaultSendActions = useVaultSendActions({
+    authedFetch,
+    importAuthedFetch,
+    session,
+    profile,
+    defaultKdfIterations,
+    encryptedCiphers: ciphersQuery.data,
+    encryptedFolders: foldersQuery.data,
+    refetchCiphers: ciphersQuery.refetch,
+    refetchFolders: foldersQuery.refetch,
+    refetchSends: sendsQuery.refetch,
+    onNotify: pushToast,
+  });
+  const accountSecurityActions = useAccountSecurityActions({
+    authedFetch,
+    profile,
+    defaultKdfIterations,
+    disableTotpPassword,
+    clearDisableTotpDialog: () => {
       setDisableTotpOpen(false);
       setDisableTotpPassword('');
-      await totpStatusQuery.refetch();
-      pushToast('success', t('txt_totp_disabled'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_disable_totp_failed'));
-    }
-  }
+    },
+    onLogoutNow: logoutNow,
+    onNotify: pushToast,
+    onProfileUpdated: setProfile,
+    onSetConfirm: setConfirm,
+    refetchTotpStatus: totpStatusQuery.refetch,
+    refetchAuthorizedDevices: authorizedDevicesQuery.refetch,
+  });
+  const adminActions = useAdminActions({
+    authedFetch,
+    onNotify: pushToast,
+    onSetConfirm: setConfirm,
+    refetchUsers: usersQuery.refetch,
+    refetchInvites: invitesQuery.refetch,
+  });
 
-  async function refreshVault() {
-    await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch(), sendsQuery.refetch()]);
-    pushToast('success', t('txt_vault_synced'));
-  }
-
-  async function refreshAuthorizedDevices() {
+  refreshAuthorizedDevicesRef.current = async () => {
     await authorizedDevicesQuery.refetch();
-  }
-
-  async function revokeDeviceTrustAction(device: AuthorizedDevice) {
-    await revokeAuthorizedDeviceTrust(authedFetch, device.identifier);
-    await authorizedDevicesQuery.refetch();
-    pushToast('success', t('txt_device_authorization_revoked'));
-  }
-
-  async function revokeAllDeviceTrustAction() {
-    await revokeAllAuthorizedDeviceTrust(authedFetch);
-    await authorizedDevicesQuery.refetch();
-    pushToast('success', t('txt_all_device_authorizations_revoked'));
-  }
-
-  async function removeDeviceAction(device: AuthorizedDevice) {
-    await deleteAuthorizedDevice(authedFetch, device.identifier);
-    await authorizedDevicesQuery.refetch();
-    pushToast('success', t('txt_device_removed'));
-  }
-
-  async function createVaultItem(draft: VaultDraft) {
-    if (!session) return;
-    try {
-      await createCipher(authedFetch, session, draft);
-      await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
-      pushToast('success', t('txt_item_created'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_create_item_failed'));
-      throw error;
-    }
-  }
-
-  async function updateVaultItem(cipher: Cipher, draft: VaultDraft) {
-    if (!session) return;
-    try {
-      await updateCipher(authedFetch, session, cipher, draft);
-      await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
-      pushToast('success', t('txt_item_updated'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_update_item_failed'));
-      throw error;
-    }
-  }
-
-  async function deleteVaultItem(cipher: Cipher) {
-    try {
-      await deleteCipher(authedFetch, cipher.id);
-      await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
-      pushToast('success', t('txt_item_deleted'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_delete_item_failed'));
-      throw error;
-    }
-  }
-
-  async function bulkDeleteVaultItems(ids: string[]) {
-    try {
-      for (const id of ids) {
-        await deleteCipher(authedFetch, id);
-      }
-      await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
-      pushToast('success', t('txt_deleted_selected_items'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_bulk_delete_failed'));
-      throw error;
-    }
-  }
-
-  async function bulkMoveVaultItems(ids: string[], folderId: string | null) {
-    try {
-      await bulkMoveCiphers(authedFetch, ids, folderId);
-      await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
-      pushToast('success', t('txt_moved_selected_items'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_bulk_move_failed'));
-      throw error;
-    }
-  }
-
-  async function getRecoveryCodeAction(masterPassword: string): Promise<string> {
-    if (!profile) throw new Error(t('txt_profile_unavailable'));
-    const normalized = String(masterPassword || '');
-    if (!normalized) throw new Error(t('txt_master_password_is_required'));
-    const derived = await deriveLoginHash(profile.email, normalized, defaultKdfIterations);
-    const code = await getTotpRecoveryCode(authedFetch, derived.hash);
-    if (!code) throw new Error(t('txt_recovery_code_is_empty'));
-    return code;
-  }
-
-  async function createSendItem(draft: SendDraft, autoCopyLink: boolean) {
-    if (!session) return;
-    try {
-      const created = await createSend(authedFetch, session, draft);
-      await sendsQuery.refetch();
-      if (autoCopyLink && created.key && session.symEncKey && session.symMacKey) {
-        const keyPart = await buildSendShareKey(created.key, session.symEncKey, session.symMacKey);
-        const shareUrl = buildPublicSendUrl(window.location.origin, created.accessId, keyPart);
-        await navigator.clipboard.writeText(shareUrl);
-      }
-      pushToast('success', t('txt_send_created'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_create_send_failed'));
-      throw error;
-    }
-  }
-
-  async function updateSendItem(send: Send, draft: SendDraft, autoCopyLink: boolean) {
-    if (!session) return;
-    try {
-      const updated = await updateSend(authedFetch, session, send, draft);
-      await sendsQuery.refetch();
-      if (autoCopyLink && updated.key && session.symEncKey && session.symMacKey) {
-        const keyPart = await buildSendShareKey(updated.key, session.symEncKey, session.symMacKey);
-        const shareUrl = buildPublicSendUrl(window.location.origin, updated.accessId, keyPart);
-        await navigator.clipboard.writeText(shareUrl);
-      }
-      pushToast('success', t('txt_send_updated'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_update_send_failed'));
-      throw error;
-    }
-  }
-
-  async function deleteSendItem(send: Send) {
-    try {
-      await deleteSend(authedFetch, send.id);
-      await sendsQuery.refetch();
-      pushToast('success', t('txt_send_deleted'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_delete_send_failed'));
-      throw error;
-    }
-  }
-
-  async function bulkDeleteSendItems(ids: string[]) {
-    try {
-      for (const id of ids) {
-        await deleteSend(authedFetch, id);
-      }
-      await sendsQuery.refetch();
-      pushToast('success', t('txt_deleted_selected_sends'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_bulk_delete_sends_failed'));
-      throw error;
-    }
-  }
-
-  async function verifyMasterPasswordAction(email: string, password: string) {
-    const derived = await deriveLoginHash(email, password, defaultKdfIterations);
-    await verifyMasterPassword(authedFetch, derived.hash);
-  }
-
-  async function createFolderAction(name: string) {
-    const folderName = name.trim();
-    if (!folderName) {
-      pushToast('error', t('txt_folder_name_is_required'));
-      return;
-    }
-    try {
-      await createFolder(authedFetch, folderName);
-      await foldersQuery.refetch();
-      pushToast('success', t('txt_folder_created'));
-    } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : t('txt_create_folder_failed'));
-      throw error;
-    }
-  }
+  };
 
   const hashPathRaw = typeof window !== 'undefined' ? window.location.hash || '' : '';
   const hashPath = hashPathRaw.startsWith('#') ? hashPathRaw.slice(1) : hashPathRaw;
+  const hashPathOnly = String(hashPath || '').split('?')[0].split('#')[0];
+  const trimmedHashPath = hashPathOnly.replace(/^\/+/, '').replace(/\/+$/, '');
+  const normalizedHashPath = trimmedHashPath ? `/${trimmedHashPath}` : '/';
+  const isImportHashRoute = IMPORT_ROUTE_ALIASES.has(normalizedHashPath);
   const effectiveLocation = hashPath.startsWith('/send/') || hashPath === '/recover-2fa' ? hashPath : location;
   const publicSendMatch = effectiveLocation.match(/^\/send\/([^/]+)(?:\/([^/]+))?\/?$/i);
   const isRecoverTwoFactorRoute = effectiveLocation === '/recover-2fa';
   const isPublicSendRoute = !!publicSendMatch;
+  const isImportRoute = location === IMPORT_ROUTE || IMPORT_ROUTE_ALIASES.has(location);
+  const showSidebarToggle = mobileLayout && (location === '/vault' || location === '/sends');
+  const sidebarToggleTitle = location === '/vault' ? t('txt_folders') : t('txt_type');
+  const mobilePrimaryRoute =
+    location === '/sends'
+      ? '/sends'
+      : location === '/vault/totp'
+        ? '/vault/totp'
+        : location === '/vault'
+          ? '/vault'
+          : '/settings';
+  const currentPageTitle = (() => {
+    if (location === '/vault/totp') return t('txt_verification_code');
+    if (location === '/sends') return t('nav_sends');
+    if (location === '/admin') return t('nav_admin_panel');
+    if (location === '/security/devices') return t('nav_device_management');
+    if (location === '/backup') return t('nav_backup_strategy');
+    if (isImportRoute) return t('nav_import_export');
+    if (location === SETTINGS_ACCOUNT_ROUTE) return t('nav_account_settings');
+    if (location === SETTINGS_HOME_ROUTE) return t('txt_settings');
+    return t('nav_my_vault');
+  })();
 
   useEffect(() => {
     if (phase === 'app' && location === '/' && !isPublicSendRoute) navigate('/vault');
   }, [phase, location, isPublicSendRoute, navigate]);
+
+  useEffect(() => {
+    if (phase === 'app' && isImportHashRoute && location !== IMPORT_ROUTE) {
+      navigate(IMPORT_ROUTE);
+    }
+  }, [phase, isImportHashRoute, location, navigate]);
+
+  useEffect(() => {
+    if (phase === 'app' && profile?.role !== 'admin' && location === '/backup') {
+      navigate('/vault');
+    }
+  }, [phase, profile?.role, location, navigate]);
+
+  useEffect(() => {
+    if (phase === 'app' && !mobileLayout && location === SETTINGS_HOME_ROUTE) {
+      navigate(SETTINGS_ACCOUNT_ROUTE);
+    }
+  }, [phase, mobileLayout, location, navigate]);
+
+  const mainRoutesProps = {
+    profile,
+    session,
+    mobileLayout,
+    importRoute: IMPORT_ROUTE,
+    settingsHomeRoute: SETTINGS_HOME_ROUTE,
+    settingsAccountRoute: SETTINGS_ACCOUNT_ROUTE,
+    decryptedCiphers,
+    decryptedFolders,
+    decryptedSends,
+    ciphersLoading: ciphersQuery.isFetching,
+    foldersLoading: foldersQuery.isFetching,
+    sendsLoading: sendsQuery.isFetching,
+    users: usersQuery.data || [],
+    invites: invitesQuery.data || [],
+    totpEnabled: !!totpStatusQuery.data?.enabled,
+    authorizedDevices: authorizedDevicesQuery.data || [],
+    authorizedDevicesLoading: authorizedDevicesQuery.isFetching,
+    onNavigate: navigate,
+    onLogout: handleLogout,
+    onNotify: pushToast,
+    onImport: vaultSendActions.importVault,
+    onImportEncryptedRaw: vaultSendActions.importEncryptedRaw,
+    onExport: vaultSendActions.exportVault,
+    onCreateVaultItem: vaultSendActions.createVaultItem,
+    onUpdateVaultItem: vaultSendActions.updateVaultItem,
+    onDeleteVaultItem: vaultSendActions.deleteVaultItem,
+    onBulkDeleteVaultItems: vaultSendActions.bulkDeleteVaultItems,
+    onBulkPermanentDeleteVaultItems: vaultSendActions.bulkPermanentDeleteVaultItems,
+    onBulkRestoreVaultItems: vaultSendActions.bulkRestoreVaultItems,
+    onBulkMoveVaultItems: vaultSendActions.bulkMoveVaultItems,
+    onVerifyMasterPassword: vaultSendActions.verifyMasterPassword,
+    onCreateFolder: vaultSendActions.createFolder,
+    onDeleteFolder: vaultSendActions.deleteFolder,
+    onBulkDeleteFolders: vaultSendActions.bulkDeleteFolders,
+    onDownloadVaultAttachment: vaultSendActions.downloadVaultAttachment,
+    downloadingAttachmentKey: vaultSendActions.downloadingAttachmentKey,
+    attachmentDownloadPercent: vaultSendActions.attachmentDownloadPercent,
+    uploadingAttachmentName: vaultSendActions.uploadingAttachmentName,
+    attachmentUploadPercent: vaultSendActions.attachmentUploadPercent,
+    onRefreshVault: vaultSendActions.refreshVault,
+    onCreateSend: vaultSendActions.createSend,
+    onUpdateSend: vaultSendActions.updateSend,
+    onDeleteSend: vaultSendActions.deleteSend,
+    onBulkDeleteSends: vaultSendActions.bulkDeleteSends,
+    uploadingSendFileName: vaultSendActions.uploadingSendFileName,
+    sendUploadPercent: vaultSendActions.sendUploadPercent,
+    onChangePassword: accountSecurityActions.changePassword,
+    onSavePasswordHint: accountSecurityActions.savePasswordHint,
+    onEnableTotp: async (secret: string, token: string) => {
+      await accountSecurityActions.enableTotp(secret, token);
+      await totpStatusQuery.refetch();
+    },
+    onOpenDisableTotp: () => setDisableTotpOpen(true),
+    onGetRecoveryCode: accountSecurityActions.getRecoveryCode,
+    onRefreshAuthorizedDevices: accountSecurityActions.refreshAuthorizedDevices,
+    onRevokeDeviceTrust: accountSecurityActions.openRevokeDeviceTrust,
+    onRemoveDevice: accountSecurityActions.openRemoveDevice,
+    onRevokeAllDeviceTrust: accountSecurityActions.openRevokeAllDeviceTrust,
+    onRemoveAllDevices: accountSecurityActions.openRemoveAllDevices,
+    onRefreshAdmin: adminActions.refreshAdmin,
+    onCreateInvite: adminActions.createInvite,
+    onDeleteAllInvites: adminActions.deleteAllInvites,
+    onToggleUserStatus: adminActions.toggleUserStatus,
+    onDeleteUser: adminActions.deleteUser,
+    onRevokeInvite: adminActions.revokeInvite,
+    onExportBackup: backupActions.exportBackup,
+    onImportBackup: backupActions.importBackup,
+    onLoadBackupSettings: backupActions.loadSettings,
+    onSaveBackupSettings: backupActions.saveSettings,
+    onRunRemoteBackup: backupActions.runRemoteBackup,
+    onListRemoteBackups: backupActions.listRemoteBackups,
+    onDownloadRemoteBackup: backupActions.downloadRemoteBackup,
+    onDeleteRemoteBackup: backupActions.deleteRemoteBackup,
+    onRestoreRemoteBackup: backupActions.restoreRemoteBackup,
+  };
 
   if (jwtWarning) {
     return <JwtWarningPage reason={jwtWarning.reason} minLength={jwtWarning.minLength} />;
@@ -835,7 +1032,7 @@ export default function App() {
     return (
       <>
         <PublicSendPage accessId={decodeURIComponent(publicSendMatch[1])} keyPart={publicSendMatch[2] ? decodeURIComponent(publicSendMatch[2]) : null} />
-        <ToastHost toasts={toasts} onClose={(id) => setToasts((prev) => prev.filter((x) => x.id !== id))} />
+        {renderPassiveOverlays()}
       </>
     );
   }
@@ -852,16 +1049,7 @@ export default function App() {
             navigate('/login');
           }}
         />
-        <ToastHost toasts={toasts} onClose={(id) => setToasts((prev) => prev.filter((x) => x.id !== id))} />
-      </>
-    );
-  }
-
-  if (phase === 'loading') {
-    return (
-      <>
-        <div className="loading-screen">{t('txt_loading_nodewarden')}</div>
-        <ToastHost toasts={toasts} onClose={(id) => setToasts((prev) => prev.filter((x) => x.id !== id))} />
+        {renderPassiveOverlays()}
       </>
     );
   }
@@ -871,313 +1059,105 @@ export default function App() {
       <>
         <AuthViews
           mode={phase}
+          pendingAction={pendingAuthAction}
+          unlockReady={!!profile}
           loginValues={loginValues}
           registerValues={registerValues}
           unlockPassword={unlockPassword}
           emailForLock={profile?.email || session?.email || ''}
+          loginHintLoading={loginHintState.loading}
           onChangeLogin={setLoginValues}
           onChangeRegister={setRegisterValues}
           onChangeUnlock={setUnlockPassword}
           onSubmitLogin={() => void handleLogin()}
           onSubmitRegister={() => void handleRegister()}
           onSubmitUnlock={() => void handleUnlock()}
-          onGotoLogin={() => setPhase('login')}
-          onGotoRegister={() => setPhase('register')}
+          onGotoLogin={() => {
+            setPhase('login');
+            navigate('/login');
+          }}
+          onGotoRegister={() => {
+            if (inviteCodeFromUrl) {
+              setRegisterValues((prev) => ({ ...prev, inviteCode: inviteCodeFromUrl }));
+            }
+            setPhase('register');
+            navigate('/register');
+          }}
           onLogout={logoutNow}
+          onTogglePasswordHint={() => void handleTogglePasswordHint()}
+          onShowLockedPasswordHint={handleShowLockedPasswordHint}
         />
-        <ToastHost toasts={toasts} onClose={(id) => setToasts((prev) => prev.filter((x) => x.id !== id))} />
-
-        <ConfirmDialog
-          open={!!pendingTotp}
-          title={t('txt_two_step_verification')}
-          message={t('txt_password_is_already_verified')}
-          confirmText={t('txt_verify')}
-          cancelText={t('txt_cancel')}
-          showIcon={false}
-          onConfirm={() => void handleTotpVerify()}
-          onCancel={() => {
+        <AppGlobalOverlays
+          toasts={toasts}
+          onCloseToast={removeToast}
+          confirm={confirm}
+          onCancelConfirm={() => setConfirm(null)}
+          pendingTotpOpen={!!pendingTotp}
+          totpCode={totpCode}
+          rememberDevice={rememberDevice}
+          onTotpCodeChange={setTotpCode}
+          onRememberDeviceChange={setRememberDevice}
+          onConfirmTotp={() => void handleTotpVerify()}
+          onCancelTotp={() => {
             setPendingTotp(null);
             setTotpCode('');
             setRememberDevice(true);
           }}
-          afterActions={(
-            <div className="dialog-extra">
-              <div className="dialog-divider" />
-              <button
-                type="button"
-                className="btn btn-secondary dialog-btn"
-                onClick={() => {
-                  setPendingTotp(null);
-                  setTotpCode('');
-                  setRememberDevice(true);
-                  navigate('/recover-2fa');
-                }}
-              >
-                {t('txt_use_recovery_code')}
-              </button>
-            </div>
-          )}
-        >
-          <label className="field">
-            <span>{t('txt_totp_code')}</span>
-            <input className="input" value={totpCode} onInput={(e) => setTotpCode((e.currentTarget as HTMLInputElement).value)} />
-          </label>
-          <label className="check-line" style={{ marginBottom: 0 }}>
-            <input type="checkbox" checked={rememberDevice} onChange={(e) => setRememberDevice((e.currentTarget as HTMLInputElement).checked)} />
-            <span>{t('txt_trust_this_device_for_30_days')}</span>
-          </label>
-        </ConfirmDialog>
+          onUseRecoveryCode={() => {
+            setPendingTotp(null);
+            setTotpCode('');
+            setRememberDevice(true);
+            navigate('/recover-2fa');
+          }}
+          disableTotpOpen={false}
+          disableTotpPassword=""
+          onDisableTotpPasswordChange={() => {}}
+          onConfirmDisableTotp={() => {}}
+          onCancelDisableTotp={() => {}}
+        />
       </>
     );
   }
 
   return (
     <>
-      <div className="app-page">
-        <div className="app-shell">
-          <header className="topbar">
-            <div className="brand">
-              <img src="/logo-64.png" alt="NodeWarden logo" className="brand-logo" />
-              <span>NodeWarden</span>
-            </div>
-            <div className="topbar-actions">
-              <div className="user-chip">
-                <ShieldUser size={16} />
-                <span>{profile?.email}</span>
-              </div>
-              <button type="button" className="btn btn-secondary small" onClick={handleLock}>
-                <Lock size={14} className="btn-icon" /> {t('txt_lock')}
-              </button>
-              <button type="button" className="btn btn-secondary small" onClick={handleLogout}>
-                <LogOut size={14} className="btn-icon" /> {t('txt_sign_out')}
-              </button>
-            </div>
-          </header>
-
-          <div className="app-main">
-            <aside className="app-side">
-              <Link href="/vault" className={`side-link ${location === '/vault' ? 'active' : ''}`}>
-                <Vault size={16} />
-                <span>{t('nav_my_vault')}</span>
-              </Link>
-              <Link href="/sends" className={`side-link ${location === '/sends' ? 'active' : ''}`}>
-                <SendIcon size={16} />
-                <span>{t('nav_sends')}</span>
-              </Link>
-              {profile?.role === 'admin' && (
-                <Link href="/admin" className={`side-link ${location === '/admin' ? 'active' : ''}`}>
-                  <ShieldUser size={16} />
-                  <span>{t('nav_admin_panel')}</span>
-                </Link>
-              )}
-              <Link href="/settings" className={`side-link ${location === '/settings' ? 'active' : ''}`}>
-                <SettingsIcon size={16} />
-                <span>{t('nav_account_settings')}</span>
-              </Link>
-              <Link href="/security/devices" className={`side-link ${location === '/security/devices' ? 'active' : ''}`}>
-                <Shield size={16} />
-                <span>{t('nav_device_management')}</span>
-              </Link>
-              <Link href="/help" className={`side-link ${location === '/help' ? 'active' : ''}`}>
-                <Cloud size={16} />
-                <span>{t('nav_backup_strategy')}</span>
-              </Link>
-              <Link href="/help/import-export" className={`side-link ${location === '/help/import-export' ? 'active' : ''}`}>
-                <ArrowUpDown size={14} />
-                <span>{t('nav_import_export')}</span>
-              </Link>
-            </aside>
-            <main className="content">
-              <Switch>
-                <Route path="/sends">
-                  <SendsPage
-                    sends={decryptedSends}
-                    loading={sendsQuery.isFetching}
-                    onRefresh={refreshVault}
-                    onCreate={createSendItem}
-                    onUpdate={updateSendItem}
-                    onDelete={deleteSendItem}
-                    onBulkDelete={bulkDeleteSendItems}
-                    onNotify={pushToast}
-                  />
-                </Route>
-                <Route path="/vault">
-                  <VaultPage
-                    ciphers={decryptedCiphers}
-                    folders={decryptedFolders}
-                    loading={ciphersQuery.isFetching || foldersQuery.isFetching}
-                    emailForReprompt={profile?.email || session?.email || ''}
-                    onRefresh={refreshVault}
-                    onCreate={createVaultItem}
-                    onUpdate={updateVaultItem}
-                    onDelete={deleteVaultItem}
-                    onBulkDelete={bulkDeleteVaultItems}
-                    onBulkMove={bulkMoveVaultItems}
-                    onVerifyMasterPassword={verifyMasterPasswordAction}
-                    onNotify={pushToast}
-                    onCreateFolder={createFolderAction}
-                  />
-                </Route>
-                <Route path="/settings">
-                  {profile && (
-                    <SettingsPage
-                      profile={profile}
-                      totpEnabled={!!totpStatusQuery.data?.enabled}
-                      onChangePassword={changePasswordAction}
-                      onEnableTotp={async (secret, token) => {
-                        await enableTotpAction(secret, token);
-                        await totpStatusQuery.refetch();
-                      }}
-                      onOpenDisableTotp={() => setDisableTotpOpen(true)}
-                      onGetRecoveryCode={getRecoveryCodeAction}
-                      onNotify={pushToast}
-                    />
-                  )}
-                </Route>
-                <Route path="/security/devices">
-                  <SecurityDevicesPage
-                    devices={authorizedDevicesQuery.data || []}
-                    loading={authorizedDevicesQuery.isFetching}
-                    onRefresh={() => void refreshAuthorizedDevices()}
-                    onRevokeTrust={(device) => {
-                      setConfirm({
-                        title: t('txt_revoke_device_authorization'),
-                        message: t('txt_revoke_30_day_totp_trust_for_name', { name: device.name }),
-                        danger: true,
-                        onConfirm: () => {
-                          setConfirm(null);
-                          void revokeDeviceTrustAction(device);
-                        },
-                      });
-                    }}
-                    onRemoveDevice={(device) => {
-                      setConfirm({
-                        title: t('txt_remove_device'),
-                        message: t('txt_remove_device_name_and_clear_its_2fa_trust', { name: device.name }),
-                        danger: true,
-                        onConfirm: () => {
-                          setConfirm(null);
-                          void removeDeviceAction(device);
-                        },
-                      });
-                    }}
-                    onRevokeAll={() => {
-                      setConfirm({
-                        title: t('txt_revoke_all_trusted_devices'),
-                        message: t('txt_revoke_30_day_totp_trust_from_all_devices'),
-                        danger: true,
-                        onConfirm: () => {
-                          setConfirm(null);
-                          void revokeAllDeviceTrustAction();
-                        },
-                      });
-                    }}
-                  />
-                </Route>
-                <Route path="/admin">
-                  <AdminPage
-                    currentUserId={profile?.id || ''}
-                    users={usersQuery.data || []}
-                    invites={invitesQuery.data || []}
-                    onRefresh={() => {
-                      void usersQuery.refetch();
-                      void invitesQuery.refetch();
-                    }}
-                    onCreateInvite={async (hours) => {
-                      await createInvite(authedFetch, hours);
-                      await invitesQuery.refetch();
-                      pushToast('success', t('txt_invite_created'));
-                    }}
-                    onDeleteAllInvites={async () => {
-                      setConfirm({
-                        title: t('txt_delete_all_invites'),
-                        message: t('txt_delete_all_invite_codes_active_inactive'),
-                        danger: true,
-                        onConfirm: () => {
-                          setConfirm(null);
-                          void (async () => {
-                            await deleteAllInvites(authedFetch);
-                            await invitesQuery.refetch();
-                            pushToast('success', t('txt_all_invites_deleted'));
-                          })();
-                        },
-                      });
-                    }}
-                    onToggleUserStatus={async (userId, status) => {
-                      await setUserStatus(authedFetch, userId, status === 'active' ? 'banned' : 'active');
-                      await usersQuery.refetch();
-                      pushToast('success', t('txt_user_status_updated'));
-                    }}
-                    onDeleteUser={async (userId) => {
-                      setConfirm({
-                        title: t('txt_delete_user'),
-                        message: t('txt_delete_this_user_and_all_user_data'),
-                        danger: true,
-                        onConfirm: () => {
-                          setConfirm(null);
-                          void (async () => {
-                            await deleteUser(authedFetch, userId);
-                            await usersQuery.refetch();
-                            pushToast('success', t('txt_user_deleted'));
-                          })();
-                        },
-                      });
-                    }}
-                    onRevokeInvite={async (code) => {
-                      await revokeInvite(authedFetch, code);
-                      await invitesQuery.refetch();
-                      pushToast('success', t('txt_invite_revoked'));
-                    }}
-                  />
-                </Route>
-                <Route path="/help/import-export">
-                  <ImportExportPage />
-                </Route>
-                <Route path="/help">
-                  <HelpPage />
-                </Route>
-              </Switch>
-            </main>
-          </div>
-        </div>
-      </div>
-
-      <ConfirmDialog
-        open={!!confirm}
-        title={confirm?.title || ''}
-        message={confirm?.message || ''}
-        danger={confirm?.danger}
-        showIcon={confirm?.showIcon}
-        onConfirm={() => confirm?.onConfirm()}
-        onCancel={() => setConfirm(null)}
+      <AppAuthenticatedShell
+        profile={profile}
+        location={location}
+        mobilePrimaryRoute={mobilePrimaryRoute}
+        currentPageTitle={currentPageTitle}
+        showSidebarToggle={showSidebarToggle}
+        sidebarToggleTitle={sidebarToggleTitle}
+        settingsAccountRoute={SETTINGS_ACCOUNT_ROUTE}
+        importRoute={IMPORT_ROUTE}
+        isImportRoute={isImportRoute}
+        onLock={handleLock}
+        onLogout={handleLogout}
+        mainRoutesProps={mainRoutesProps}
       />
 
-      <ConfirmDialog
-        open={disableTotpOpen}
-        title={t('txt_disable_totp')}
-        message={t('txt_enter_master_password_to_disable_two_step_verification')}
-        confirmText={t('txt_disable_totp')}
-        cancelText={t('txt_cancel')}
-        danger
-        showIcon={false}
-        onConfirm={() => void disableTotpAction()}
-        onCancel={() => {
+      <AppGlobalOverlays
+        toasts={toasts}
+        onCloseToast={removeToast}
+        confirm={confirm}
+        onCancelConfirm={() => setConfirm(null)}
+        pendingTotpOpen={false}
+        totpCode=""
+        rememberDevice={false}
+        onTotpCodeChange={() => {}}
+        onRememberDeviceChange={() => {}}
+        onConfirmTotp={() => {}}
+        onCancelTotp={() => {}}
+        onUseRecoveryCode={() => {}}
+        disableTotpOpen={disableTotpOpen}
+        disableTotpPassword={disableTotpPassword}
+        onDisableTotpPasswordChange={setDisableTotpPassword}
+        onConfirmDisableTotp={() => void accountSecurityActions.disableTotp()}
+        onCancelDisableTotp={() => {
           setDisableTotpOpen(false);
           setDisableTotpPassword('');
         }}
-      >
-        <label className="field">
-          <span>{t('txt_master_password')}</span>
-          <input
-            className="input"
-            type="password"
-            value={disableTotpPassword}
-            onInput={(e) => setDisableTotpPassword((e.currentTarget as HTMLInputElement).value)}
-          />
-        </label>
-      </ConfirmDialog>
-
-      <ToastHost toasts={toasts} onClose={(id) => setToasts((prev) => prev.filter((x) => x.id !== id))} />
+      />
     </>
   );
 }

@@ -1,4 +1,4 @@
-export type AppPhase = 'loading' | 'register' | 'login' | 'locked' | 'app';
+export type AppPhase = 'register' | 'login' | 'locked' | 'app';
 
 export interface SessionState {
   accessToken: string;
@@ -13,6 +13,9 @@ export interface Profile {
   email: string;
   name: string;
   key: string;
+  masterPasswordHint?: string | null;
+  privateKey?: string | null;
+  publicKey?: string | null;
   role: 'admin' | 'user';
   [k: string]: unknown;
 }
@@ -28,11 +31,28 @@ export interface CipherLoginUri {
   decUri?: string;
 }
 
+export interface CipherAttachment {
+  id?: string;
+  url?: string | null;
+  fileName?: string | null;
+  decFileName?: string;
+  key?: string | null;
+  size?: string | number | null;
+  sizeName?: string | null;
+  object?: string;
+}
+
+export interface CipherLoginPasskey {
+  creationDate?: string | null;
+  [key: string]: unknown;
+}
+
 export interface CipherLogin {
   username?: string | null;
   password?: string | null;
   totp?: string | null;
   uris?: CipherLoginUri[] | null;
+  fido2Credentials?: CipherLoginPasskey[] | null;
   decUsername?: string;
   decPassword?: string;
   decTotp?: string;
@@ -95,6 +115,7 @@ export interface CipherIdentity {
 export interface CipherSshKey {
   privateKey?: string | null;
   publicKey?: string | null;
+  keyFingerprint?: string | null;
   fingerprint?: string | null;
   decPrivateKey?: string;
   decPublicKey?: string;
@@ -105,6 +126,7 @@ export interface CipherField {
   type?: number | string | null;
   name?: string | null;
   value?: string | null;
+  linkedId?: number | null;
   decName?: string;
   decValue?: string;
 }
@@ -121,10 +143,13 @@ export interface Cipher {
   creationDate?: string;
   revisionDate?: string;
   deletedDate?: string | null;
+  attachments?: CipherAttachment[] | null;
   login?: CipherLogin | null;
   card?: CipherCard | null;
   identity?: CipherIdentity | null;
   sshKey?: CipherSshKey | null;
+  secureNote?: { type?: number | null } | null;
+  passwordHistory?: Array<{ password?: string | null; lastUsedDate?: string | null }> | null;
   fields?: CipherField[] | null;
   decName?: string;
   decNotes?: string;
@@ -196,6 +221,7 @@ export interface VaultDraft {
   loginPassword: string;
   loginTotp: string;
   loginUris: string[];
+  loginFido2Credentials: Array<Record<string, unknown>>;
   cardholderName: string;
   cardNumber: string;
   cardBrand: string;
@@ -231,11 +257,7 @@ export interface ListResponse<T> {
   data: T[];
 }
 
-export interface SetupStatusResponse {
-  registered: boolean;
-}
-
-export interface WebConfigResponse {
+export interface WebBootstrapResponse {
   defaultKdfIterations?: number;
   jwtUnsafeReason?: 'missing' | 'default' | 'too_short' | null;
   jwtSecretMinLength?: number;
@@ -244,7 +266,23 @@ export interface WebConfigResponse {
 export interface TokenSuccess {
   access_token: string;
   refresh_token: string;
+  expires_in?: number;
+  token_type?: string;
   TwoFactorToken?: string;
+  Key?: string;
+  PrivateKey?: string | null;
+  AccountKeys?: unknown | null;
+  accountKeys?: unknown | null;
+  Kdf?: number;
+  KdfIterations?: number;
+  KdfMemory?: number | null;
+  KdfParallelism?: number | null;
+  ForcePasswordReset?: boolean;
+  ResetMasterPassword?: boolean;
+  scope?: string;
+  unofficialServer?: boolean;
+  UserDecryptionOptions?: unknown;
+  userDecryptionOptions?: unknown;
 }
 
 export interface TokenError {
@@ -255,7 +293,7 @@ export interface TokenError {
 
 export interface ToastMessage {
   id: string;
-  type: 'success' | 'error';
+  type: 'success' | 'error' | 'warning';
   text: string;
 }
 
@@ -281,6 +319,7 @@ export interface AuthorizedDevice {
   type: number;
   creationDate: string | null;
   revisionDate: string | null;
+  online: boolean;
   trusted: boolean;
   trustedTokenCount: number;
   trustedUntil: string | null;
