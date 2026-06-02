@@ -1,10 +1,14 @@
 import type { Device, DevicePendingAuthRequest, DeviceResponse, ProtectedDeviceResponse as ProtectedDeviceWireResponse } from '../types';
 import { Env } from '../types';
 import { getOnlineUserDevices, notifyUserLogout } from '../durable/notifications-hub';
+import { AuthService } from '../services/auth';
+import { auditRequestMetadata, writeAuditEvent } from '../services/audit-events';
 import { StorageService } from '../services/storage';
 import { errorResponse, jsonResponse } from '../utils/response';
 import { readKnownDeviceProbe } from '../utils/device';
 import { generateUUID } from '../utils/uuid';
+
+const PERMANENT_TRUST_EXPIRES_AT_MS = Date.UTC(2099, 11, 31, 23, 59, 59);
 
 function normalizeIdentifier(value: string | null | undefined): string {
   return String(value || '').trim();
@@ -23,13 +27,18 @@ function isTrustedDevice(device: Pick<Device, 'encryptedUserKey' | 'encryptedPub
 }
 
 function buildDeviceResponse(device: Device): DeviceResponse {
+  const displayName = String(device.deviceNote || '').trim() || device.name;
   const response = {
     Id: device.deviceIdentifier,
     id: device.deviceIdentifier,
     UserId: device.userId,
     userId: device.userId,
-    Name: device.name,
-    name: device.name,
+    Name: displayName,
+    name: displayName,
+    SystemName: device.name,
+    systemName: device.name,
+    DeviceNote: device.deviceNote,
+    deviceNote: device.deviceNote,
     Identifier: device.deviceIdentifier,
     identifier: device.deviceIdentifier,
     Type: device.type,
@@ -38,6 +47,10 @@ function buildDeviceResponse(device: Device): DeviceResponse {
     creationDate: device.createdAt,
     RevisionDate: device.updatedAt,
     revisionDate: device.updatedAt,
+    LastSeenAt: device.lastSeenAt,
+    lastSeenAt: device.lastSeenAt,
+    HasStoredDevice: true,
+    hasStoredDevice: true,
     IsTrusted: isTrustedDevice(device),
     isTrusted: isTrustedDevice(device),
     EncryptedUserKey: device.encryptedUserKey,
@@ -55,8 +68,12 @@ function buildProtectedDeviceResponse(device: Device): ProtectedDeviceWireRespon
   const response = {
     Id: device.deviceIdentifier,
     id: device.deviceIdentifier,
-    Name: device.name,
-    name: device.name,
+    Name: String(device.deviceNote || '').trim() || device.name,
+    name: String(device.deviceNote || '').trim() || device.name,
+    SystemName: device.name,
+    systemName: device.name,
+    DeviceNote: device.deviceNote,
+    deviceNote: device.deviceNote,
     Identifier: device.deviceIdentifier,
     identifier: device.deviceIdentifier,
     Type: device.type,
@@ -99,6 +116,10 @@ async function readJsonBody(request: Request): Promise<any> {
   } catch {
     return null;
   }
+}
+
+function parseDeviceName(value: unknown): string {
+  return String(value || '').trim().slice(0, 128);
 }
 
 // GET /api/devices/knowndevice
@@ -203,12 +224,15 @@ export async function handleGetAuthorizedDevices(request: Request, env: Env, use
       encryptedPublicKey: null,
       encryptedPrivateKey: null,
       devicePendingAuthRequest: null,
+      deviceNote: null,
+      lastSeenAt: null,
       createdAt: '',
       updatedAt: '',
     };
     data.push({
       ...buildDeviceResponse(placeholderDevice),
       isTrusted: true,
+      hasStoredDevice: false,
       online: onlineSet.has(row.deviceIdentifier),
       trusted: true,
       trustedTokenCount: row.tokenCount,
@@ -245,7 +269,48 @@ export async function handleRevokeTrustedDevice(
 
   const storage = new StorageService(env.DB);
   const removed = await storage.deleteTrustedTwoFactorTokensByDevice(userId, normalized);
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.trust.revoke',
+    category: 'device',
+    level: 'security',
+    targetType: 'device',
+    targetId: normalized,
+    metadata: { removed, ...auditRequestMetadata(request) },
+  });
   return jsonResponse({ success: true, removed });
+}
+
+// POST /api/devices/authorized/:deviceIdentifier/permanent
+// Upgrades an existing active 2FA remember-token record to permanent trust.
+export async function handleTrustDevicePermanently(
+  request: Request,
+  env: Env,
+  userId: string,
+  deviceIdentifier: string
+): Promise<Response> {
+  void request;
+  const normalized = String(deviceIdentifier || '').trim();
+  if (!normalized) return errorResponse('Invalid device identifier', 400);
+
+  const storage = new StorageService(env.DB);
+  const updated = await storage.updateTrustedTwoFactorTokensExpiryByDevice(userId, normalized, PERMANENT_TRUST_EXPIRES_AT_MS);
+  if (!updated) return errorResponse('Device is not currently trusted', 409);
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.trust.permanent',
+    category: 'device',
+    level: 'security',
+    targetType: 'device',
+    targetId: normalized,
+    metadata: { updated, ...auditRequestMetadata(request) },
+  });
+
+  return jsonResponse({
+    success: true,
+    updated,
+    trustedUntil: new Date(PERMANENT_TRUST_EXPIRES_AT_MS).toISOString(),
+  });
 }
 
 // DELETE /api/devices/:deviceIdentifier
@@ -264,9 +329,51 @@ export async function handleDeleteDevice(
   await storage.deleteRefreshTokensByDevice(userId, normalized);
   const deleted = await storage.deleteDevice(userId, normalized);
   if (deleted) {
-    await notifyUserLogout(env, userId, normalized);
+    AuthService.invalidateDeviceCache(userId, normalized);
+    notifyUserLogout(env, userId, normalized);
   }
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.delete',
+    category: 'device',
+    level: 'security',
+    targetType: 'device',
+    targetId: normalized,
+    metadata: { deleted, ...auditRequestMetadata(request) },
+  });
   return jsonResponse({ success: deleted });
+}
+
+// PUT /api/devices/:deviceIdentifier/name
+export async function handleUpdateDeviceName(
+  request: Request,
+  env: Env,
+  userId: string,
+  deviceIdentifier: string
+): Promise<Response> {
+  const normalized = String(deviceIdentifier || '').trim();
+  if (!normalized) return errorResponse('Invalid device identifier', 400);
+
+  const body = await readJsonBody(request);
+  const name = parseDeviceName(body?.name);
+  if (!name) return errorResponse('Device name is required', 400);
+
+  const storage = new StorageService(env.DB);
+  const updated = await storage.updateDeviceName(userId, normalized, name);
+  if (!updated) return errorResponse('Device not found', 404);
+
+  const device = await storage.getDevice(userId, normalized);
+  if (!device) return errorResponse('Device not found', 404);
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.name.update',
+    category: 'device',
+    level: 'info',
+    targetType: 'device',
+    targetId: normalized,
+    metadata: { name, ...auditRequestMetadata(request) },
+  });
+  return jsonResponse(buildDeviceResponse(device));
 }
 
 // DELETE /api/devices
@@ -284,7 +391,17 @@ export async function handleDeleteAllDevices(request: Request, env: Env, userId:
   user.securityStamp = generateUUID();
   user.updatedAt = new Date().toISOString();
   await storage.saveUser(user);
-  await notifyUserLogout(env, userId, null);
+  AuthService.invalidateUserCache(userId);
+  notifyUserLogout(env, userId, null);
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.delete_all',
+    category: 'device',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: { removedTrusted, removedSessions, removedDevices, ...auditRequestMetadata(request) },
+  });
   return jsonResponse({ success: true, removedTrusted, removedSessions: removedSessions ?? 0, removedDevices });
 }
 
@@ -376,6 +493,15 @@ export async function handleUntrustDevices(
     if (!deviceIdentifier) continue;
     await storage.deleteTrustedTwoFactorTokensByDevice(userId, deviceIdentifier);
   }
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.trust.revoke_batch',
+    category: 'device',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: { requested: devices.length, removed, ...auditRequestMetadata(request) },
+  });
   return jsonResponse({ success: true, removed });
 }
 
@@ -415,8 +541,18 @@ export async function handleDeactivateDevice(
   await storage.deleteRefreshTokensByDevice(userId, normalized);
   const deleted = await storage.deleteDevice(userId, normalized);
   if (deleted) {
-    await notifyUserLogout(env, userId, normalized);
+    AuthService.invalidateDeviceCache(userId, normalized);
+    notifyUserLogout(env, userId, normalized);
   }
+  await writeAuditEvent(storage, {
+    actorUserId: userId,
+    action: 'device.deactivate',
+    category: 'device',
+    level: 'security',
+    targetType: 'device',
+    targetId: normalized,
+    metadata: { deleted, ...auditRequestMetadata(request) },
+  });
   return jsonResponse({ success: deleted });
 }
 

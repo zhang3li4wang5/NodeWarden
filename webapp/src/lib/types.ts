@@ -25,17 +25,24 @@ export interface Folder {
   id: string;
   name: string;
   decName?: string;
+  revisionDate?: string;
+  creationDate?: string;
 }
 
 export interface CipherLoginUri {
   uri?: string | null;
+  uriChecksum?: string | null;
   match?: number | null;
+  response?: unknown | null;
   decUri?: string;
+  [key: string]: unknown;
 }
 
 export interface VaultDraftLoginUri {
   uri: string;
   match: number | null;
+  originalUri?: string;
+  extra?: Record<string, unknown>;
 }
 
 export interface CipherAttachment {
@@ -60,9 +67,14 @@ export interface CipherLogin {
   totp?: string | null;
   uris?: CipherLoginUri[] | null;
   fido2Credentials?: CipherLoginPasskey[] | null;
+  autofillOnPageLoad?: boolean | null;
+  uri?: string | null;
+  passwordRevisionDate?: string | null;
+  response?: unknown | null;
   decUsername?: string;
   decPassword?: string;
   decTotp?: string;
+  [key: string]: unknown;
 }
 
 export interface CipherCard {
@@ -138,6 +150,12 @@ export interface CipherField {
   decValue?: string;
 }
 
+export interface CipherPasswordHistoryEntry {
+  password?: string | null;
+  lastUsedDate?: string | null;
+  decPassword?: string;
+}
+
 export interface Cipher {
   id: string;
   type: number;
@@ -157,7 +175,7 @@ export interface Cipher {
   identity?: CipherIdentity | null;
   sshKey?: CipherSshKey | null;
   secureNote?: { type?: number | null } | null;
-  passwordHistory?: Array<{ password?: string | null; lastUsedDate?: string | null }> | null;
+  passwordHistory?: CipherPasswordHistoryEntry[] | null;
   fields?: CipherField[] | null;
   decName?: string;
   decNotes?: string;
@@ -263,12 +281,18 @@ export interface VaultDraft {
 export interface ListResponse<T> {
   object: 'list';
   data: T[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  hasMore?: boolean;
+  continuationToken?: string | null;
 }
 
 export interface WebBootstrapResponse {
   defaultKdfIterations?: number;
   jwtUnsafeReason?: 'missing' | 'default' | 'too_short' | null;
   jwtSecretMinLength?: number;
+  registrationInviteRequired?: boolean;
 }
 
 export interface TokenSuccess {
@@ -325,15 +349,69 @@ export interface AdminInvite {
   expiresAt?: string;
 }
 
+export type AuditLogCategory = 'auth' | 'security' | 'device' | 'data' | 'system';
+export type AuditLogLevel = 'info' | 'warn' | 'error' | 'security';
+
+export interface AuditLogEntry {
+  id: string;
+  actorUserId: string | null;
+  actorEmail?: string | null;
+  action: string;
+  category: AuditLogCategory;
+  level: AuditLogLevel;
+  targetType: string | null;
+  targetId: string | null;
+  targetUserEmail?: string | null;
+  metadata: string | null;
+  createdAt: string;
+  object?: 'auditLog';
+}
+
+export interface AuditLogSettings {
+  retentionDays: number | null;
+  maxEntries: number | null;
+}
+
+export interface AuditLogListResult {
+  logs: AuditLogEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface AuthorizedDevice {
   id: string;
   name: string;
+  systemName?: string | null;
+  deviceNote?: string | null;
   identifier: string;
   type: number;
   creationDate: string | null;
   revisionDate: string | null;
+  lastSeenAt?: string | null;
+  hasStoredDevice?: boolean;
   online: boolean;
   trusted: boolean;
   trustedTokenCount: number;
   trustedUntil: string | null;
+}
+
+export interface GlobalEquivalentDomain {
+  type: number;
+  domains: string[];
+  excluded: boolean;
+}
+
+export interface CustomEquivalentDomain {
+  id: string;
+  domains: string[];
+  excluded: boolean;
+}
+
+export interface DomainRules {
+  equivalentDomains: string[][];
+  customEquivalentDomains: CustomEquivalentDomain[];
+  globalEquivalentDomains: GlobalEquivalentDomain[];
+  object: 'domains';
 }

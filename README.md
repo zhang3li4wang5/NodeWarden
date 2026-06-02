@@ -1,19 +1,27 @@
 <p align="center">
-  <img src="./NodeWarden.png" alt="NodeWarden Logo" />
+  <img src="./NodeWarden.svg" alt="NodeWarden Logo" />
 </p>
 
 <p align="center">
-  运行在 Cloudflare Workers 上的第三方 Bitwarden 兼容服务端。
+  运行在 Cloudflare Workers 上的 Bitwarden 兼容服务端
 </p>
 
-[![Powered by Cloudflare](https://img.shields.io/badge/Powered%20by-Cloudflare-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
-[![License: LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-2ea44f)](./LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/shuaiplus/NodeWarden?display_name=tag)](https://github.com/shuaiplus/NodeWarden/releases/latest)
-[![Sync Upstream](https://github.com/shuaiplus/NodeWarden/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/shuaiplus/NodeWarden/actions/workflows/sync-upstream.yml)
+<p align="center">
+  <a href="https://workers.cloudflare.com/"><img src="https://img.shields.io/badge/Powered%20by-Cloudflare-F38020?logo=cloudflare&logoColor=white" alt="Powered by Cloudflare" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0-2ea44f" alt="License: LGPL-3.0" /></a>
+  <a href="https://github.com/shuaiplus/NodeWarden/releases/latest"><img src="https://img.shields.io/github/v/release/shuaiplus/NodeWarden?display_name=tag" alt="Latest Release" /></a>
+  <a href="https://github.com/shuaiplus/NodeWarden/actions/workflows/sync-upstream.yml"><img src="https://github.com/shuaiplus/NodeWarden/actions/workflows/sync-upstream.yml/badge.svg" alt="Sync Upstream" /></a>
+</p>
 
-[更新日志](./RELEASE_NOTES.md) | [提交问题](https://github.com/shuaiplus/NodeWarden/issues/new/choose) | [最新发布](https://github.com/shuaiplus/NodeWarden/releases/latest)
+<p align="center">
+  <a href="https://t.me/NodeWarden_News">Telegram 频道</a> |
+  <a href="https://t.me/NodeWarden_Official">Telegram 群组</a>
+</p>
 
-English: [`README_EN.md`](./README_EN.md)
+<p align="center">
+  <a href="./README_EN.md">English</a> |
+  <a href="./CONTRIBUTING.md">贡献指南</a>
+</p>
 
 > **免责声明**  
 > 本项目仅供学习与交流使用，请定期备份你的密码库。  
@@ -30,7 +38,7 @@ English: [`README_EN.md`](./README_EN.md)
 | 附件上传 / 下载 | ✅ | ✅ | Cloudflare R2 或 KV |
 | Send | ✅ | ✅ | 支持文本与文件 Send |
 | 导入 / 导出 | ✅ | ✅ | 支持 Bitwarden JSON / CSV / **ZIP 导入（包括附件）** |
-| **云端备份中心** | ❌ | ✅ | **支持 WebDAV / E3 定时备份** |
+| **云端备份中心** | ❌ | ✅ | **支持 WebDAV / S3 定时备份** |
 | 密码提示（网页端） | ⚠️ 有限 | ✅ | **无需发送邮件** |
 | TOTP / Steam TOTP | ✅ | ✅ | 含 `steam://` 支持 |
 | 多用户 | ✅ | ✅ | 支持邀请码注册 |
@@ -50,16 +58,21 @@ English: [`README_EN.md`](./README_EN.md)
 
 ---
 
-## 网页部署
+## 可视化快速部署
 
-1. Fork `NodeWarden` 仓库到自己的 GitHub 账号
-2. 进入  [Cloudflare Workers 创建页面](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create)
-3. 选择 `Continue with GitHub`
-4. 选择你刚刚 Fork 的仓库
-5. 保持默认配置继续部署
-6. 如果你打算用 KV 模式，把部署命令改成 `npm run deploy:kv`
-7. 等部署完成后，打开生成的 Workers 域名
-8. 根据页面提示设置`JWT_SECRET` ，不建议临时乱填。这个值直接关系到令牌签发安全，正式环境至少使用 32 个字符以上的随机字符串。
+1. Fork NodeWarden 仓库到自己的 GitHub 账号
+2. 进入 [Cloudflare Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create)
+3. 选择 Continue with GitHub 并选择你的仓库
+4. 构建命令填 `npm run build`，部署命令填 `npm run deploy`
+- 如果你打算用 KV 模式，把部署命令改成 `npm run deploy:kv`
+5. 等部署完成后，打开生成的 Workers 域名
+
+- Workers 默认域名在部分网络环境不可直连。如需自定义域名，到 [Workers 设置](https://dash.cloudflare.com/?to=/:account/workers/services/view/nodewarden/production/settings)里添加。
+
+- 页面提示缺少 `JWT_SECRET` 时，到 Workers 设置里添加 Secret。正式环境至少使用 32 个字符以上的随机字符串，不要使用临时值或示例值。
+
+- 这套流程里，用户实际做的是把代码交给 Cloudflare 构建并部署。代码里的 `wrangler.toml` 或 `wrangler.kv.toml` 决定绑定名，Worker 第一次处理请求时会自动初始化 D1 schema，不需要用户上传 SQL。
+
 
 > [!TIP] 
 > 默认R2与可选KV的区别：

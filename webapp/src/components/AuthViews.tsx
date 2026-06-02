@@ -19,11 +19,15 @@ interface RegisterValues {
 
 interface AuthViewsProps {
   mode: 'login' | 'register' | 'locked';
+  relaxedLoginInput?: boolean;
+  authPlaceholder?: string;
+  unlockPlaceholder?: string;
   pendingAction: 'login' | 'register' | 'unlock' | null;
   unlockReady: boolean;
   unlockPreparing: boolean;
   loginValues: LoginValues;
   registerValues: RegisterValues;
+  registrationInviteRequired?: boolean;
   unlockPassword: string;
   emailForLock: string;
   loginHintLoading: boolean;
@@ -46,6 +50,7 @@ function PasswordField(props: {
   onInput: (v: string) => void;
   autoFocus?: boolean;
   autoComplete?: string;
+  placeholder?: string;
 }) {
   const [show, setShow] = useState(false);
   return (
@@ -59,6 +64,7 @@ function PasswordField(props: {
           onInput={(e) => props.onInput((e.currentTarget as HTMLInputElement).value)}
           autoFocus={props.autoFocus}
           autoComplete={props.autoComplete}
+          placeholder={props.placeholder}
         />
         <button type="button" className="eye-btn" onClick={() => setShow((v) => !v)}>
           {show ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -72,6 +78,7 @@ export default function AuthViews(props: AuthViewsProps) {
   const loginBusy = props.pendingAction === 'login';
   const registerBusy = props.pendingAction === 'register';
   const unlockBusy = props.pendingAction === 'unlock';
+  const showInviteCodeField = props.registrationInviteRequired !== false || !!props.registerValues.inviteCode.trim();
 
   if (props.mode === 'locked') {
     return (
@@ -90,6 +97,7 @@ export default function AuthViews(props: AuthViewsProps) {
               value={props.unlockPassword}
               autoFocus
               autoComplete="current-password"
+              placeholder={props.unlockPlaceholder}
               onInput={props.onChangeUnlock}
             />
             <div className="auth-support-row">
@@ -178,17 +186,19 @@ export default function AuthViews(props: AuthViewsProps) {
                 }
               />
             </label>
-            <label className="field">
-              <span>{t('txt_invite_code_optional')}</span>
-              <input
-                className="input"
-                value={props.registerValues.inviteCode}
-                autoComplete="off"
-                onInput={(e) =>
-                  props.onChangeRegister({ ...props.registerValues, inviteCode: (e.currentTarget as HTMLInputElement).value })
-                }
-              />
-            </label>
+            {showInviteCodeField ? (
+              <label className="field">
+                <span>{t('txt_invite_code_required')}</span>
+                <input
+                  className="input"
+                  value={props.registerValues.inviteCode}
+                  autoComplete="off"
+                  onInput={(e) =>
+                    props.onChangeRegister({ ...props.registerValues, inviteCode: (e.currentTarget as HTMLInputElement).value })
+                  }
+                />
+              </label>
+            ) : null}
             <button type="submit" className="btn btn-primary full" disabled={registerBusy}>
               <UserPlus size={16} className="btn-icon" />
               {registerBusy ? t('txt_registering') : t('txt_create_account')}
@@ -217,9 +227,11 @@ export default function AuthViews(props: AuthViewsProps) {
             <span>{t('txt_email')}</span>
             <input
               className="input"
-              type="email"
+              type={props.relaxedLoginInput ? 'text' : 'email'}
               value={props.loginValues.email}
               autoComplete="username"
+              placeholder={props.authPlaceholder}
+              autoFocus
               onInput={(e) => props.onChangeLogin({ ...props.loginValues, email: (e.currentTarget as HTMLInputElement).value })}
             />
           </label>
@@ -227,8 +239,8 @@ export default function AuthViews(props: AuthViewsProps) {
             label={t('txt_master_password')}
             value={props.loginValues.password}
             autoComplete="current-password"
+            placeholder={props.authPlaceholder}
             onInput={(v) => props.onChangeLogin({ ...props.loginValues, password: v })}
-            autoFocus
           />
           <div className="auth-support-row">
             <span />
@@ -236,7 +248,7 @@ export default function AuthViews(props: AuthViewsProps) {
               type="button"
               className="auth-link-btn"
               onClick={props.onTogglePasswordHint}
-              disabled={loginBusy || !props.loginValues.email.trim()}
+              disabled={loginBusy || props.loginHintLoading || !props.loginValues.email.trim()}
             >
               {props.loginHintLoading
                 ? t('txt_loading_password_hint')

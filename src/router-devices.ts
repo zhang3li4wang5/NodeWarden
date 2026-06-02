@@ -11,8 +11,10 @@ import {
   handleDeactivateDevice,
   handleRevokeAllTrustedDevices,
   handleRevokeTrustedDevice,
+  handleTrustDevicePermanently,
   handleDeleteAllDevices,
   handleDeleteDevice,
+  handleUpdateDeviceName,
   handleUpdateDeviceToken,
   handleUpdateDeviceWebPushAuth,
   handleClearDeviceToken,
@@ -43,6 +45,12 @@ export async function handleAuthenticatedDeviceRoute(
     return handleRevokeTrustedDevice(request, env, userId, deviceIdentifier);
   }
 
+  const permanentAuthorizedDeviceMatch = path.match(/^\/api\/devices\/authorized\/([^/]+)\/permanent$/i);
+  if (permanentAuthorizedDeviceMatch && method === 'POST') {
+    const deviceIdentifier = decodeURIComponent(permanentAuthorizedDeviceMatch[1]);
+    return handleTrustDevicePermanently(request, env, userId, deviceIdentifier);
+  }
+
   const deleteDeviceMatch = path.match(/^\/api\/devices\/([^/]+)$/i);
   if (deleteDeviceMatch && method === 'GET') {
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
@@ -51,6 +59,12 @@ export async function handleAuthenticatedDeviceRoute(
   if (deleteDeviceMatch && method === 'DELETE') {
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
     return handleDeleteDevice(request, env, userId, deviceIdentifier);
+  }
+
+  const updateDeviceNameMatch = path.match(/^\/api\/devices\/([^/]+)\/name$/i);
+  if (updateDeviceNameMatch && method === 'PUT') {
+    const deviceIdentifier = decodeURIComponent(updateDeviceNameMatch[1]);
+    return handleUpdateDeviceName(request, env, userId, deviceIdentifier);
   }
 
   const identifierMatch = path.match(/^\/api\/devices\/identifier\/([^/]+)$/i);

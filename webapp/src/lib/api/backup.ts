@@ -6,7 +6,7 @@ import type {
   BackupRuntimeState,
   BackupScheduleConfig,
   BackupSettings as AdminBackupSettings,
-  E3BackupDestination,
+  S3BackupDestination,
   WebDavBackupDestination,
 } from '@shared/backup-schema';
 import {
@@ -26,7 +26,7 @@ export type {
   BackupRuntimeState,
   BackupScheduleConfig,
   AdminBackupSettings,
-  E3BackupDestination,
+  S3BackupDestination,
   WebDavBackupDestination,
 };
 
@@ -94,6 +94,7 @@ export interface RemoteBackupBrowserResponse {
 export interface AdminBackupImportCounts {
   config: number;
   users: number;
+  domainSettings?: number;
   userRevisions: number;
   folders: number;
   ciphers: number;

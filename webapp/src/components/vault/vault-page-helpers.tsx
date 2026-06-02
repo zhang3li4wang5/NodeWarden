@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useMemo } from 'preact/hooks';
 import {
   CreditCard,
   FileKey2,
@@ -10,6 +10,7 @@ import {
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { t } from '@/lib/i18n';
 import type { Cipher, CipherAttachment, CustomFieldType, VaultDraft, VaultDraftField, VaultDraftLoginUri } from '@/lib/types';
+import WebsiteIcon from './WebsiteIcon';
 
 export type TypeFilter = 'login' | 'card' | 'identity' | 'note' | 'ssh';
 export type VaultSortMode = 'edited' | 'created' | 'name';
@@ -27,39 +28,139 @@ interface TypeOption {
   label: string;
 }
 
-export const CREATE_TYPE_OPTIONS: TypeOption[] = [
-  { type: 1, label: t('txt_login') },
-  { type: 3, label: t('txt_card') },
-  { type: 4, label: t('txt_identity') },
-  { type: 2, label: t('txt_note') },
-  { type: 5, label: t('txt_ssh_key') },
-];
+export const CARD_BRAND_OPTIONS = [
+  'Visa',
+  'Mastercard',
+  'American Express',
+  'Discover',
+  'Diners Club',
+  'JCB',
+  'Maestro',
+  'UnionPay',
+  'RuPay',
+] as const;
+
+type CardBrand = typeof CARD_BRAND_OPTIONS[number];
+
+const CARD_BRAND_ALIASES: Record<string, CardBrand> = {
+  amex: 'American Express',
+  'american express': 'American Express',
+  americanexpress: 'American Express',
+  discover: 'Discover',
+  diners: 'Diners Club',
+  'diners club': 'Diners Club',
+  dinersclub: 'Diners Club',
+  jcb: 'JCB',
+  maestro: 'Maestro',
+  mastercard: 'Mastercard',
+  master: 'Mastercard',
+  rupay: 'RuPay',
+  unionpay: 'UnionPay',
+  'union pay': 'UnionPay',
+  visa: 'Visa',
+};
+
+const CARD_BRAND_LOGO_SLUGS: Partial<Record<CardBrand, string>> = {
+  'American Express': 'american-express',
+  'Diners Club': 'diners',
+  Discover: 'discover',
+  JCB: 'jcb',
+  Maestro: 'maestro',
+  Mastercard: 'mastercard',
+  UnionPay: 'unionpay',
+  Visa: 'visa',
+};
+
+export function normalizeCardBrand(value: string | null | undefined): string {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  return CARD_BRAND_ALIASES[normalized.toLowerCase().replace(/\s+/g, ' ')] || normalized;
+}
+
+export function displayCardBrand(value: string | null | undefined): string {
+  return normalizeCardBrand(value);
+}
+
+export function cardLast4(value: string | null | undefined): string {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 4 ? digits.slice(-4) : '';
+}
+
+export function cardListSubtitle(cipher: Cipher): string {
+  const brand = displayCardBrand(cipher.card?.decBrand ?? cipher.card?.brand);
+  const last4 = cardLast4(cipher.card?.decNumber ?? cipher.card?.number);
+  if (brand && last4) return `${brand}, *${last4}`;
+  if (brand) return brand;
+  if (last4) return `*${last4}`;
+  return cipherTypeLabel(3);
+}
+
+export function CardBrandIcon({ brand }: { brand?: string | null }) {
+  const display = displayCardBrand(brand);
+  const key = display.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'generic';
+  const label = display || t('txt_card');
+  const logoSlug = CARD_BRAND_LOGO_SLUGS[display as CardBrand];
+  return (
+    <span className={`card-brand-icon card-brand-${key}`} aria-label={label} title={label}>
+      {logoSlug ? (
+        <img src={`/payment-logos/cards/${logoSlug}.svg`} alt="" loading="lazy" decoding="async" />
+      ) : (
+        <CreditCard size={18} />
+      )}
+    </span>
+  );
+}
+
+export function getCreateTypeOptions(): TypeOption[] {
+  return [
+    { type: 1, label: t('txt_login') },
+    { type: 3, label: t('txt_card') },
+    { type: 4, label: t('txt_identity') },
+    { type: 2, label: t('txt_note') },
+    { type: 5, label: t('txt_ssh_key') },
+  ];
+}
 
 export const VAULT_SORT_STORAGE_KEY = 'nodewarden.vault.sort.v1';
-export const MOBILE_LAYOUT_QUERY = '(max-width: 900px)';
-export const VAULT_LIST_ROW_HEIGHT = 66;
+export const FOLDER_SORT_STORAGE_KEY = 'nodewarden.folder-sort.v1';
+export const MOBILE_LAYOUT_QUERY = '(max-width: 1180px)';
+export const VAULT_LIST_ROW_HEIGHT = 74;
 export const VAULT_LIST_OVERSCAN = 10;
-export const VAULT_SORT_OPTIONS: Array<{ value: VaultSortMode; label: string }> = [
-  { value: 'edited', label: t('txt_sort_last_edited') },
-  { value: 'created', label: t('txt_sort_created') },
-  { value: 'name', label: t('txt_sort_name') },
-];
+export function getVaultSortOptions(): Array<{ value: VaultSortMode; label: string }> {
+  return [
+    { value: 'edited', label: t('txt_sort_last_edited') },
+    { value: 'created', label: t('txt_sort_created') },
+    { value: 'name', label: t('txt_sort_name') },
+  ];
+}
 
-export const FIELD_TYPE_OPTIONS: Array<{ value: CustomFieldType; label: string }> = [
-  { value: 0, label: t('txt_text') },
-  { value: 1, label: t('txt_hidden') },
-  { value: 2, label: t('txt_boolean') },
-];
+export function getFolderSortOptions(): Array<{ value: VaultSortMode; label: string }> {
+  return [
+    { value: 'edited', label: t('txt_sort_last_edited') },
+    { value: 'created', label: t('txt_sort_created') },
+    { value: 'name', label: t('txt_sort_name') },
+  ];
+}
 
-export const WEBSITE_MATCH_OPTIONS: Array<{ value: number | null; label: string }> = [
-  { value: null, label: t('txt_uri_match_default_base_domain') },
-  { value: 0, label: t('txt_uri_match_base_domain') },
-  { value: 1, label: t('txt_uri_match_host') },
-  { value: 3, label: t('txt_uri_match_exact') },
-  { value: 5, label: t('txt_uri_match_never') },
-  { value: 2, label: t('txt_uri_match_starts_with') },
-  { value: 4, label: t('txt_uri_match_regular_expression') },
-];
+export function getFieldTypeOptions(): Array<{ value: CustomFieldType; label: string }> {
+  return [
+    { value: 0, label: t('txt_text') },
+    { value: 1, label: t('txt_hidden') },
+    { value: 2, label: t('txt_boolean') },
+  ];
+}
+
+export function getWebsiteMatchOptions(): Array<{ value: number | null; label: string }> {
+  return [
+    { value: null, label: t('txt_uri_match_default_base_domain') },
+    { value: 0, label: t('txt_uri_match_base_domain') },
+    { value: 1, label: t('txt_uri_match_host') },
+    { value: 3, label: t('txt_uri_match_exact') },
+    { value: 5, label: t('txt_uri_match_never') },
+    { value: 2, label: t('txt_uri_match_starts_with') },
+    { value: 4, label: t('txt_uri_match_regular_expression') },
+  ];
+}
 
 export const TOTP_PERIOD_SECONDS = 30;
 export const TOTP_RING_RADIUS = 14;
@@ -141,36 +242,15 @@ export function toBooleanFieldValue(raw: string): boolean {
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
-export function firstCipherUri(cipher: Cipher): string {
-  const uris = cipher.login?.uris || [];
-  for (const uri of uris) {
-    const raw = uri.decUri || uri.uri || '';
-    if (raw.trim()) return raw.trim();
-  }
-  return '';
-}
-
-export function hostFromUri(uri: string): string {
-  if (!uri.trim()) return '';
-  try {
-    const normalized = /^https?:\/\//i.test(uri) ? uri : `https://${uri}`;
-    return new URL(normalized).hostname || '';
-  } catch {
-    return '';
-  }
-}
-
-export function websiteIconUrl(host: string): string {
-  return `/icons/${encodeURIComponent(host)}/icon.png`;
-}
+export { firstCipherUri, hostFromUri, websiteIconUrl } from '@/lib/website-utils';
 
 export function createEmptyLoginUri(): VaultDraftLoginUri {
-  return { uri: '', match: null };
+  return { uri: '', match: null, originalUri: '', extra: {} };
 }
 
 export function websiteMatchLabel(value: number | null | undefined): string {
   const normalized = typeof value === 'number' && Number.isFinite(value) ? value : null;
-  return WEBSITE_MATCH_OPTIONS.find((option) => option.value === normalized)?.label || t('txt_uri_match_default_base_domain');
+  return getWebsiteMatchOptions().find((option) => option.value === normalized)?.label || t('txt_uri_match_default_base_domain');
 }
 
 function valueOrFallback(value: string | null | undefined): string {
@@ -313,6 +393,10 @@ export function draftFromCipher(cipher: Cipher): VaultDraft {
     draft.loginUris = (cipher.login.uris || []).map((x) => ({
       uri: x.decUri || x.uri || '',
       match: x.match ?? null,
+      originalUri: x.decUri || x.uri || '',
+      extra: Object.fromEntries(
+        Object.entries(x as Record<string, unknown>).filter(([key]) => !['uri', 'match', 'decUri'].includes(key))
+      ),
     }));
     draft.loginFido2Credentials = Array.isArray(cipher.login.fido2Credentials)
       ? cipher.login.fido2Credentials.map((credential) => ({ ...credential }))
@@ -322,7 +406,7 @@ export function draftFromCipher(cipher: Cipher): VaultDraft {
   if (cipher.card) {
     draft.cardholderName = cipher.card.decCardholderName || '';
     draft.cardNumber = cipher.card.decNumber || '';
-    draft.cardBrand = cipher.card.decBrand || '';
+    draft.cardBrand = normalizeCardBrand(cipher.card.decBrand || '');
     draft.cardExpMonth = cipher.card.decExpMonth || '';
     draft.cardExpYear = cipher.card.decExpYear || '';
     draft.cardCode = cipher.card.decCode || '';
@@ -423,32 +507,11 @@ export function firstPasskeyCreationTime(cipher: Cipher | null): string | null {
   return null;
 }
 
-const failedIconHosts = new Set<string>();
-
 export function VaultListIcon({ cipher }: { cipher: Cipher }) {
-  const uri = firstCipherUri(cipher);
-  const host = hostFromUri(uri);
-  const [errored, setErrored] = useState(() => (host ? failedIconHosts.has(host) : false));
-  if (host && !errored) {
-    return (
-      <img
-        className="list-icon"
-        src={websiteIconUrl(host)}
-        alt=""
-        loading="lazy"
-        referrerPolicy="no-referrer"
-        onError={() => {
-          failedIconHosts.add(host);
-          setErrored(true);
-        }}
-      />
-    );
+  if (Number(cipher.type || 1) === 3) {
+    return <CardBrandIcon brand={cipher.card?.decBrand ?? cipher.card?.brand} />;
   }
-  return (
-    <span className="list-icon-fallback">
-      <TypeIcon type={Number(cipher.type || 1)} />
-    </span>
-  );
+  return <WebsiteIcon cipher={cipher} fallback={<TypeIcon type={Number(cipher.type || 1)} />} />;
 }
 
 export function copyToClipboard(value: string): void {
